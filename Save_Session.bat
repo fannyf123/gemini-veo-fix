@@ -6,14 +6,16 @@ color 0B
 echo.
 echo  ============================================
 echo    Gemini Session Saver
-echo    Login manual sekali, simpan session
 echo  ============================================
 echo.
+echo  PENTING: Tutup Google Chrome sebelum lanjut!
+echo.
 echo  Langkah:
-echo  1. Browser Chrome akan terbuka
-echo  2. Login MANUAL dengan email kamu
-echo  3. Setelah masuk ke halaman Gemini, tekan ENTER
-echo  4. Session tersimpan otomatis
+echo  1. Tutup semua jendela Google Chrome
+echo  2. Tekan ENTER di terminal
+echo  3. Login manual di browser yang terbuka
+echo  4. Tekan ENTER lagi setelah berhasil masuk
+echo  5. Session tersimpan otomatis
 echo.
 pause
 
