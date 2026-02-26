@@ -4,20 +4,17 @@ gemini_enterprise.py
 Otomasi login + generate video di business.gemini.google
 via Playwright + OTP otomatis dari GmailOTPReader.
 
-Flow:
-    1. Buka auth.business.gemini.google/login
-    2. Input email (Firefox Relay mask)
-    3. OTP otomatis via GmailOTPReader
-    4. Masuk dashboard Gemini Enterprise
-    5. Klik "+" → "Create videos with Veo"
-    6. Input prompt → submit
-    7. Polling hingga video selesai
-    8. Download → simpan ke OUTPUT_GEMINI/
+Fix bot-detection:
+    - Sembunyikan webdriver property via JS inject
+    - User agent Chrome real (bukan HeadlessChrome)
+    - Human-like mouse movement + random delay
+    - Pakai channel='chrome' jika tersedia
 """
 
 import os
 import re
 import time
+import random
 import threading
 from typing import Optional, Callable
 
@@ -34,20 +31,56 @@ VIDEO_GEN_TIMEOUT = 600
 POLLING_INTERVAL  = 8
 MAX_OTP_RETRY     = 3
 
-# ── Semua kemungkinan selector email input ─────────────────────────────────
+# ── JS inject untuk sembunyikan tanda-tanda automation ──────────────────────
+STEALTH_JS = """
+    // Hapus webdriver flag
+    Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined
+    });
+
+    // Hapus automation-related properties
+    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+
+    // Override plugins agar tidak kosong (browser asli punya plugins)
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5]
+    });
+
+    // Override languages
+    Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en']
+    });
+
+    // Sembunyikan chrome automation flag
+    window.chrome = {
+        runtime: {},
+        loadTimes: function(){},
+        csi: function(){},
+        app: {}
+    };
+
+    // Override permissions
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications' ?
+        Promise.resolve({ state: Notification.permission }) :
+        originalQuery(parameters)
+    );
+"""
+
 EMAIL_SELECTORS = [
     "input[type='email']",
     "input[name='email']",
-    "input[id*='email']",
-    "input[placeholder*='mail']",
-    "input[placeholder*='Email']",
+    "input[id*='email' i]",
+    "input[placeholder*='mail' i]",
     "input[autocomplete='email']",
-    "input[jsname]",                 # Google sering pakai jsname
-    "input[type='text']",            # fallback: text input biasa
-    "input",                         # fallback total
+    "input[jsname]",
+    "input[type='text']",
+    "input",
 ]
 
-# ── Selector submit button ─────────────────────────────────────────────────
 SUBMIT_SELECTORS = [
     "button[type='submit']",
     "button:has-text('Continue')",
@@ -60,9 +93,6 @@ SUBMIT_SELECTORS = [
 
 
 class GeminiEnterpriseProcessor(threading.Thread):
-    """
-    Satu thread = satu sesi generate video Gemini Enterprise.
-    """
 
     def __init__(
         self,
@@ -100,94 +130,137 @@ class GeminiEnterpriseProcessor(threading.Thread):
     def cancel(self):
         self._cancelled = True
 
-    # ── Debug helper: simpan screenshot + HTML ────────────────────────────
     def _debug_dump(self, page, label: str):
-        """Simpan screenshot dan HTML ke folder DEBUG/ untuk analisis."""
         try:
             os.makedirs(self.debug_dir, exist_ok=True)
-            ts       = int(time.time())
-            ss_path  = os.path.join(self.debug_dir, f"{label}_{ts}.png")
-            html_path= os.path.join(self.debug_dir, f"{label}_{ts}.html")
-
-            page.screenshot(path=ss_path, full_page=True)
-            with open(html_path, "w", encoding="utf-8") as f:
+            ts = int(time.time())
+            page.screenshot(path=os.path.join(self.debug_dir, f"{label}_{ts}.png"), full_page=True)
+            with open(os.path.join(self.debug_dir, f"{label}_{ts}.html"), "w", encoding="utf-8") as f:
                 f.write(page.content())
-
-            self._log(f"🔍 DEBUG screenshot: {ss_path}", "WARNING")
-            self._log(f"🔍 DEBUG HTML dump : {html_path}", "WARNING")
+            self._log(f"🔍 DEBUG disimpan: DEBUG/{label}_{ts}.*", "WARNING")
         except Exception as e:
             self._log(f"⚠️  Debug dump gagal: {e}", "WARNING")
 
-    # ── Cari input element dengan multi-selector fallback ─────────────────
-    def _find_input(self, page, selectors: list, timeout_ms: int = 15_000):
-        """
-        Coba selector satu per satu sampai ada yang ketemu.
-        Return element atau None.
-        """
-        # Coba semua selector sekaligus dalam satu query
+    def _log_all_inputs(self, page):
+        try:
+            inputs = page.query_selector_all("input, textarea")
+            self._log(f"🔍 {len(inputs)} input ditemukan di halaman:", "WARNING")
+            for i, el in enumerate(inputs[:10]):
+                self._log(
+                    f"   [{i}] type={el.get_attribute('type') or '-'} "
+                    f"name={el.get_attribute('name') or '-'} "
+                    f"id={el.get_attribute('id') or '-'} "
+                    f"placeholder={el.get_attribute('placeholder') or '-'} "
+                    f"jsname={el.get_attribute('jsname') or '-'}",
+                    "WARNING"
+                )
+        except: pass
+
+    def _find_input(self, page, selectors, timeout_ms=15_000):
         combined = ", ".join(selectors)
         try:
             el = page.wait_for_selector(combined, timeout=timeout_ms)
             if el:
-                tag  = el.evaluate("el => el.tagName")
-                name = el.get_attribute("name") or ""
-                typ  = el.get_attribute("type") or ""
-                self._log(f"   ✅ Input ditemukan: <{tag.lower()} type='{typ}' name='{name}'>")
+                self._log(f"   ✅ Input: type={el.get_attribute('type')} name={el.get_attribute('name')}")
                 return el
         except PWTimeout:
             pass
-
-        # Fallback: coba satu-satu
         for sel in selectors:
             el = page.query_selector(sel)
             if el:
-                tag  = el.evaluate("el => el.tagName")
-                name = el.get_attribute("name") or ""
-                typ  = el.get_attribute("type") or ""
-                self._log(f"   ✅ Input fallback [{sel}]: <{tag.lower()} type='{typ}' name='{name}'>")
+                self._log(f"   ✅ Input fallback [{sel}]")
                 return el
-
         return None
 
-    # ── Log semua input di halaman (debug) ────────────────────────────────
-    def _log_all_inputs(self, page):
-        """Log semua <input> yang ada di halaman untuk debug."""
-        try:
-            inputs = page.query_selector_all("input, textarea")
-            self._log(f"🔍 Total input/textarea di halaman: {len(inputs)}", "WARNING")
-            for i, el in enumerate(inputs[:10]):
-                typ  = el.get_attribute("type") or "-"
-                name = el.get_attribute("name") or "-"
-                pid  = el.get_attribute("id") or "-"
-                ph   = el.get_attribute("placeholder") or "-"
-                jsn  = el.get_attribute("jsname") or "-"
-                self._log(f"   [{i}] type={typ} name={name} id={pid} placeholder={ph} jsname={jsn}", "WARNING")
-        except Exception as e:
-            self._log(f"⚠️  Log inputs gagal: {e}", "WARNING")
+    def _human_type(self, page, element, text: str):
+        """Ketik seperti manusia: random delay antar karakter."""
+        element.click()
+        page.wait_for_timeout(random.randint(200, 400))
+        element.fill("")  # clear dulu
+        page.wait_for_timeout(random.randint(100, 200))
+        for char in text:
+            element.type(char, delay=random.randint(60, 150))
+        page.wait_for_timeout(random.randint(300, 600))
 
-    # ──────────────────────────────────────────────────────────────────────
+    def _human_click(self, page, element):
+        """Klik dengan sedikit jitter posisi (seperti manusia)."""
+        try:
+            box = element.bounding_box()
+            if box:
+                x = box["x"] + box["width"] / 2 + random.randint(-3, 3)
+                y = box["y"] + box["height"] / 2 + random.randint(-3, 3)
+                page.mouse.move(x, y)
+                page.wait_for_timeout(random.randint(80, 180))
+                page.mouse.click(x, y)
+            else:
+                element.click()
+        except:
+            element.click()
+
+    # ───────────────────────────────────────────────────────────────────
     def run(self):
         os.makedirs(self.output_dir, exist_ok=True)
         try:
             with sync_playwright() as pw:
-                browser = pw.chromium.launch(
-                    headless=self.config.get("headless", False),
+
+                # ── Coba pakai Chrome asli (lebih susah dideteksi) ────────────
+                headless = self.config.get("headless", False)
+                launch_kwargs = dict(
+                    headless=headless,
                     args=[
                         "--no-sandbox",
                         "--disable-blink-features=AutomationControlled",
                         "--disable-dev-shm-usage",
-                    ]
+                        "--disable-extensions",
+                        "--disable-plugins-discovery",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                        "--disable-background-networking",
+                        "--disable-backgrounding-occluded-windows",
+                        "--disable-renderer-backgrounding",
+                        "--disable-ipc-flooding-protection",
+                        "--password-store=basic",
+                        "--use-mock-keychain",
+                    ],
+                    ignore_default_args=["--enable-automation"],  # ← KEY: hilangkan flag automation
                 )
+
+                # Coba channel chrome dulu, fallback ke chromium
+                try:
+                    browser = pw.chromium.launch(channel="chrome", **launch_kwargs)
+                    self._log("💻 Menggunakan Google Chrome (real browser)")
+                except Exception:
+                    browser = pw.chromium.launch(**launch_kwargs)
+                    self._log("💻 Menggunakan Chromium (fallback)")
+
                 ctx = browser.new_context(
-                    viewport={"width": 1280, "height": 900},
+                    viewport={"width": random.randint(1260, 1400), "height": random.randint(860, 950)},
                     user_agent=(
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/122.0.0.0 Safari/537.36"
+                        "Chrome/122.0.6261.112 Safari/537.36"
                     ),
                     locale="en-US",
+                    timezone_id="Asia/Jakarta",
+                    color_scheme="dark",
+                    extra_http_headers={
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                        "sec-ch-ua-mobile": "?0",
+                        "sec-ch-ua-platform": '"Windows"',
+                    }
                 )
+
+                # ── Inject stealth JS sebelum halaman apapun diload ────────────
+                ctx.add_init_script(STEALTH_JS)
+
                 page   = ctx.new_page()
+
+                # ── Overwrite navigator.webdriver setelah page dibuat ──────────
+                page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                """)
+
                 result = self._run_session(page)
                 browser.close()
 
@@ -199,61 +272,85 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._log(f"❌ Fatal error: {e}", "ERROR")
             self._done(False, str(e))
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────────
     def _run_session(self, page) -> Optional[str]:
 
         # ── 1. Buka halaman login ──────────────────────────────────────────
         self._log("🌐 Membuka halaman login Gemini Enterprise...")
         self._progress(5, "Membuka halaman login...")
+
+        # Buka Google dulu (biar cookies Google terbentuk lebih natural)
+        page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=20_000)
+        page.wait_for_timeout(random.randint(1500, 2500))
+
+        # Baru buka Gemini login
         page.goto(GEMINI_LOGIN_URL, wait_until="networkidle", timeout=40_000)
-        page.wait_for_timeout(3000)
-        self._log(f"   URL saat ini: {page.url}")
+        page.wait_for_timeout(random.randint(2000, 3500))
+
+        current_url = page.url
+        self._log(f"   URL: {current_url}")
+
+        # Cek apakah langsung kena error page
+        if "signin-error" in current_url:
+            self._log("⚠️  Terdeteksi signin-error saat buka halaman! Coba pakai channel=chrome.", "WARNING")
+            self._debug_dump(page, "step1_signin_error")
+            return None
+
         if self._cancelled: return None
 
         # ── 2. Input email ─────────────────────────────────────────────────
-        self._log(f"📧 Mencari field email...")
+        self._log("📧 Mencari field email...")
         self._progress(10, "Input email...")
-
-        # Debug: log semua input yang ada
         self._log_all_inputs(page)
 
         email_input = self._find_input(page, EMAIL_SELECTORS, timeout_ms=15_000)
-
         if not email_input:
-            self._log("❌ Input email tidak ditemukan! Menyimpan debug info...", "ERROR")
+            self._log("❌ Input email tidak ditemukan!", "ERROR")
             self._debug_dump(page, "step2_email_not_found")
-            self._log("   Cek folder DEBUG/ untuk screenshot dan HTML.", "WARNING")
             return None
 
-        self._log(f"📧 Input email: {self.mask_email}")
+        self._log(f"📧 Mengetik email: {self.mask_email}")
         try:
             email_input.scroll_into_view_if_needed()
-            email_input.click()
-            page.wait_for_timeout(300)
-            email_input.fill("")
-            email_input.type(self.mask_email, delay=80)
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(random.randint(300, 600))
 
-            # Debug: cek value yang terisi
+            # Human-like: gerakkan mouse ke area form dulu
+            self._human_type(page, email_input, self.mask_email)
+
             val = email_input.input_value()
             self._log(f"   ✅ Nilai input: '{val}'")
 
-            # Cari tombol submit
+            if val != self.mask_email:
+                self._log("   ⚠️  Nilai tidak sesuai, coba fill ulang...", "WARNING")
+                email_input.fill(self.mask_email)
+                page.wait_for_timeout(500)
+
+            # Random pause sebelum klik submit (seperti manusia setelah mengetik)
+            page.wait_for_timeout(random.randint(800, 1500))
+
             submit_el = None
             for sel in SUBMIT_SELECTORS:
                 submit_el = page.query_selector(sel)
                 if submit_el:
-                    self._log(f"   ✅ Tombol submit: [{sel}]")
+                    self._log(f"   ✅ Submit: [{sel}]")
                     break
 
             if submit_el:
-                submit_el.click()
+                self._human_click(page, submit_el)
             else:
                 self._log("   ⚠️  Tombol submit tidak ditemukan, pakai Enter", "WARNING")
                 page.keyboard.press("Enter")
 
-            self._log("✅ Email tersubmit, menunggu halaman OTP...")
-            page.wait_for_timeout(3000)
+            self._log("✅ Email tersubmit, menunggu respons...")
+            page.wait_for_timeout(random.randint(2500, 4000))
+
+            # Cek apakah kena error setelah submit
+            if "signin-error" in page.url:
+                self._log("❌ Google mendeteksi bot setelah submit email!", "ERROR")
+                self._log("   → Solusi: Install Google Chrome asli dan pastikan PATH tersedia.", "WARNING")
+                self._log("   → Run: python -c \"from playwright.sync_api import sync_playwright; p=sync_playwright().start(); p.chromium.launch(channel='chrome')\" untuk test.", "WARNING")
+                self._debug_dump(page, "step2_bot_detected")
+                return None
 
         except Exception as e:
             self._log(f"❌ Error saat input email: {e}", "ERROR")
@@ -264,9 +361,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
         # ── 3. Baca OTP dari Gmail ─────────────────────────────────────────
         self._progress(20, "Menunggu OTP dari Gmail...")
-        self._log(f"   URL setelah submit email: {page.url}")
-
-        # Debug: dump halaman OTP
+        self._log(f"   URL setelah submit: {page.url}")
         self._debug_dump(page, "step3_otp_page")
         self._log_all_inputs(page)
 
@@ -274,208 +369,171 @@ class GeminiEnterpriseProcessor(threading.Thread):
         reg_ts   = int(time.time())
 
         for attempt in range(1, MAX_OTP_RETRY + 1):
-            self._log(f"📬 Polling OTP (percobaan {attempt}/{MAX_OTP_RETRY})...")
+            self._log(f"📬 Polling OTP ({attempt}/{MAX_OTP_RETRY})...")
             try:
                 otp_code = self._otp_reader.wait_for_otp(
-                    sender          = "google.com",
-                    timeout         = OTP_TIMEOUT,
-                    interval        = 5,
-                    log_callback    = self.log_cb,
-                    mask_email      = self.mask_email,
-                    after_timestamp = reg_ts,
+                    sender="google.com", timeout=OTP_TIMEOUT, interval=5,
+                    log_callback=self.log_cb, mask_email=self.mask_email,
+                    after_timestamp=reg_ts,
                 )
                 self._log(f"✅ OTP: {otp_code}", "SUCCESS")
                 break
             except TimeoutError:
-                self._log(f"⚠️  OTP timeout (percobaan {attempt})", "WARNING")
+                self._log(f"⚠️  OTP timeout ({attempt})", "WARNING")
                 if attempt < MAX_OTP_RETRY:
                     resend = page.query_selector(
-                        "button:has-text('Resend'), a:has-text('Resend'), "
-                        "button:has-text('Send again')"
+                        "button:has-text('Resend'), a:has-text('Resend'), button:has-text('Send again')"
                     )
                     if resend:
-                        self._log("🔄 Klik Resend OTP...")
-                        resend.click()
+                        self._human_click(page, resend)
                         page.wait_for_timeout(2000)
                         reg_ts = int(time.time())
                     else:
-                        self._log("🔄 Kembali ke halaman login...")
                         page.goto(GEMINI_LOGIN_URL, wait_until="networkidle")
                         page.wait_for_timeout(2000)
-                        ei = self._find_input(page, EMAIL_SELECTORS, timeout_ms=10_000)
+                        ei = self._find_input(page, EMAIL_SELECTORS, 10_000)
                         if ei:
-                            ei.fill(self.mask_email)
+                            self._human_type(page, ei, self.mask_email)
                             page.keyboard.press("Enter")
                             page.wait_for_timeout(2000)
                             reg_ts = int(time.time())
 
         if not otp_code:
-            self._log("❌ Gagal dapat OTP setelah semua percobaan!", "ERROR")
+            self._log("❌ Gagal dapat OTP!", "ERROR")
             self._debug_dump(page, "step3_otp_failed")
             return None
         if self._cancelled: return None
 
-        # ── 4. Input OTP ke form ───────────────────────────────────────────
+        # ── 4. Input OTP ──────────────────────────────────────────────────
         self._progress(35, "Memasukkan kode OTP...")
-        self._log("✏️  Input OTP ke form...")
-
-        # Debug: log semua input
+        self._log("✏️  Input OTP...")
         self._log_all_inputs(page)
-
         try:
             otp_inputs = page.query_selector_all(
-                "input[type='text'][maxlength='1'], "
-                "input[autocomplete='one-time-code'], "
-                "input[name*='otp'], input[name*='code'], "
-                "input[placeholder*='code'], input[placeholder*='OTP']"
+                "input[type='text'][maxlength='1'], input[autocomplete='one-time-code'], "
+                "input[name*='otp'], input[name*='code'], input[placeholder*='code']"
             )
             if len(otp_inputs) > 1:
-                self._log(f"   Multi-digit input: {len(otp_inputs)} kotak")
                 for i, digit in enumerate(otp_code[:len(otp_inputs)]):
                     otp_inputs[i].fill(digit)
-                    page.wait_for_timeout(120)
+                    page.wait_for_timeout(random.randint(100, 200))
             elif len(otp_inputs) == 1:
-                self._log("   Single OTP input")
-                otp_inputs[0].fill(otp_code)
+                self._human_type(page, otp_inputs[0], otp_code)
             else:
-                self._log("   Fallback: type keyboard", "WARNING")
                 page.keyboard.type(otp_code, delay=100)
 
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(random.randint(600, 1000))
             verify_btn = page.query_selector(
                 "button[type='submit'], button:has-text('Verify'), "
                 "button:has-text('Continue'), button:has-text('Sign in')"
             )
-            if verify_btn: verify_btn.click()
-            else:          page.keyboard.press("Enter")
+            if verify_btn: self._human_click(page, verify_btn)
+            else: page.keyboard.press("Enter")
 
-            self._log("✅ OTP tersubmit, menunggu redirect dashboard...")
+            self._log("✅ OTP tersubmit, menunggu redirect...")
             page.wait_for_url("**/business.gemini.google/**", timeout=25_000)
             self._log("✅ Login berhasil!", "SUCCESS")
 
         except PWTimeout:
             self._log("❌ Login gagal — redirect timeout!", "ERROR")
-            self._debug_dump(page, "step4_otp_submit_failed")
+            self._debug_dump(page, "step4_otp_failed")
             return None
         if self._cancelled: return None
 
         # ── 5. Klik "+" → "Create videos with Veo" ────────────────────────
-        self._progress(50, "Membuka menu Create videos with Veo...")
+        self._progress(50, "Membuka menu Veo...")
         self._log("🎬 Mencari tombol tools...")
-        page.wait_for_timeout(3000)
-
-        # Debug halaman dashboard
+        page.wait_for_timeout(random.randint(2500, 4000))
         self._debug_dump(page, "step5_dashboard")
 
         try:
-            # Coba berbagai kemungkinan selector tools/+ button
             tools_selectors = [
                 "button[aria-label*='tool' i]",
                 "button[aria-label*='attach' i]",
                 "button[aria-label*='more' i]",
-                "button[data-tooltip*='tool' i]",
                 "[role='button'][aria-label*='tool' i]",
                 "button[jsname]:not([type='submit'])",
-                # Selector berdasarkan posisi di form area
                 "form button:first-of-type",
-                "form [role='button']:first-of-type",
             ]
             tools_btn = None
             for sel in tools_selectors:
                 el = page.query_selector(sel)
                 if el:
-                    self._log(f"   ✅ Tools button ditemukan: [{sel}]")
+                    self._log(f"   ✅ Tools btn: [{sel}]")
                     tools_btn = el
                     break
 
             if not tools_btn:
-                self._log("❌ Tombol tools tidak ditemukan! Cek DEBUG/", "ERROR")
-                self._debug_dump(page, "step5_tools_not_found")
+                self._log("❌ Tombol tools tidak ditemukan!", "ERROR")
+                self._debug_dump(page, "step5_no_tools")
                 return None
 
-            tools_btn.click()
-            page.wait_for_timeout(1200)
+            self._human_click(page, tools_btn)
+            page.wait_for_timeout(random.randint(900, 1500))
 
-            # Klik item "Create videos with Veo"
-            veo_selectors = [
+            veo_item = None
+            for sel in [
                 "[role='menuitem']:has-text('Create videos with Veo')",
                 "[role='option']:has-text('Create videos with Veo')",
                 "li:has-text('Create videos with Veo')",
-                "div[role='menuitem']:has-text('Create videos')",
-                "*:has-text('Create videos with Veo')",
-            ]
-            veo_item = None
-            for sel in veo_selectors:
+                "div:has-text('Create videos with Veo')",
+            ]:
                 try:
                     veo_item = page.wait_for_selector(sel, timeout=5_000)
                     if veo_item:
-                        self._log(f"   ✅ Veo menu item: [{sel}]")
+                        self._log(f"   ✅ Veo menu: [{sel}]")
                         break
                 except PWTimeout:
                     continue
 
             if not veo_item:
-                self._log("❌ Menu 'Create videos with Veo' tidak ditemukan!", "ERROR")
-                self._debug_dump(page, "step5_veo_menu_not_found")
+                self._log("❌ Menu Veo tidak ditemukan!", "ERROR")
+                self._debug_dump(page, "step5_no_veo")
                 return None
 
-            veo_item.click()
+            self._human_click(page, veo_item)
             self._log("✅ 'Create videos with Veo' dipilih!", "SUCCESS")
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(random.randint(1500, 2500))
 
         except Exception as e:
-            self._log(f"❌ Error menu tools: {e}", "ERROR")
+            self._log(f"❌ Error menu: {e}", "ERROR")
             self._debug_dump(page, "step5_error")
             return None
         if self._cancelled: return None
 
         # ── 6. Input prompt ────────────────────────────────────────────────
-        self._progress(60, "Memasukkan prompt video...")
-        self._log(f"✏️  Prompt: {self.prompt[:80]}...")
-
-        # Debug setelah klik Veo
-        self._debug_dump(page, "step6_after_veo_click")
-
+        self._progress(60, "Input prompt...")
+        self._debug_dump(page, "step6_veo_open")
         try:
-            prompt_selectors = [
-                "textarea",
-                "[contenteditable='true']",
-                "input[placeholder*='prompt' i]",
-                "input[placeholder*='describe' i]",
-                "input[placeholder*='video' i]",
-                "[role='textbox']",
-            ]
-            prompt_el = self._find_input(page, prompt_selectors, timeout_ms=12_000)
+            prompt_el = self._find_input(page, [
+                "textarea", "[contenteditable='true']",
+                "input[placeholder*='prompt' i]", "[role='textbox']",
+            ], timeout_ms=12_000)
 
             if not prompt_el:
                 self._log("❌ Input prompt tidak ditemukan!", "ERROR")
-                self._debug_dump(page, "step6_prompt_not_found")
+                self._debug_dump(page, "step6_no_prompt")
                 return None
 
-            prompt_el.click()
-            page.wait_for_timeout(300)
-            prompt_el.fill(self.prompt)
-            page.wait_for_timeout(800)
+            self._human_type(page, prompt_el, self.prompt)
+            page.wait_for_timeout(random.randint(600, 1000))
 
             send_btn = page.query_selector(
                 "button[aria-label*='send' i], button[aria-label*='generate' i], "
                 "button[aria-label*='Submit' i], button[type='submit']"
             )
-            if send_btn:
-                send_btn.click()
-            else:
-                page.keyboard.press("Enter")
+            if send_btn: self._human_click(page, send_btn)
+            else: page.keyboard.press("Enter")
 
-            self._log("✅ Prompt tersubmit! Menunggu Veo generate...", "SUCCESS")
-
+            self._log("✅ Prompt tersubmit!", "SUCCESS")
         except Exception as e:
-            self._log(f"❌ Error input prompt: {e}", "ERROR")
+            self._log(f"❌ Error prompt: {e}", "ERROR")
             self._debug_dump(page, "step6_error")
             return None
         if self._cancelled: return None
 
-        # ── 7. Polling sampai video siap ───────────────────────────────────
-        self._progress(70, "Menunggu Veo generate video...")
+        # ── 7. Polling video ────────────────────────────────────────────────
+        self._progress(70, "Menunggu Veo generate...")
         self._log(f"⏳ Polling max {VIDEO_GEN_TIMEOUT}s...")
         start       = time.time()
         video_ready = False
@@ -483,57 +541,42 @@ class GeminiEnterpriseProcessor(threading.Thread):
         while time.time() - start < VIDEO_GEN_TIMEOUT:
             if self._cancelled: return None
             elapsed = int(time.time() - start)
-            pct     = min(70 + int((elapsed / VIDEO_GEN_TIMEOUT) * 18), 88)
-            self._progress(pct, f"Generate... {elapsed}s/{VIDEO_GEN_TIMEOUT}s")
+            self._progress(min(70 + int((elapsed / VIDEO_GEN_TIMEOUT) * 18), 88),
+                           f"Generate... {elapsed}s/{VIDEO_GEN_TIMEOUT}s")
 
             dl = page.query_selector(
                 "button:has-text('Download'), a[download], "
-                "button[aria-label*='download' i], [role='button']:has-text('Download')"
+                "button[aria-label*='download' i]"
             )
-            if dl:
-                self._log("✅ Video siap didownload!", "SUCCESS")
-                video_ready = True
-                break
+            if dl: video_ready = True; break
 
             vid = page.query_selector("video[src]")
-            if vid:
-                src = vid.get_attribute("src") or ""
-                if src and "blob" not in src:
-                    self._log("✅ Elemen video ditemukan!", "SUCCESS")
-                    video_ready = True
-                    break
+            if vid and "blob" not in (vid.get_attribute("src") or ""):
+                video_ready = True; break
 
             time.sleep(POLLING_INTERVAL)
 
         if not video_ready:
-            self._log(f"❌ Timeout {VIDEO_GEN_TIMEOUT}s — video tidak selesai.", "ERROR")
             self._debug_dump(page, "step7_timeout")
             return None
         if self._cancelled: return None
 
-        # ── 8. Download video ──────────────────────────────────────────────
+        # ── 8. Download ─────────────────────────────────────────────────────
         self._progress(90, "Mendownload video...")
-        self._log("📥 Mendownload video hasil...")
         try:
-            out_path = os.path.join(
-                self.output_dir, f"gemini_veo_{int(time.time())}.mp4"
-            )
+            out_path = os.path.join(self.output_dir, f"gemini_veo_{int(time.time())}.mp4")
             with page.expect_download(timeout=120_000) as dl_info:
                 dl_btn = page.query_selector(
-                    "button:has-text('Download'), a[download], "
-                    "button[aria-label*='download' i]"
+                    "button:has-text('Download'), a[download], button[aria-label*='download' i]"
                 )
-                if dl_btn:
-                    dl_btn.click()
-                else:
-                    raise Exception("Tombol download tidak ditemukan")
+                if dl_btn: self._human_click(page, dl_btn)
+                else: raise Exception("Tombol download tidak ditemukan")
 
             dl_info.value.save_as(out_path)
-            self._log(f"✅ Video tersimpan: {out_path}", "SUCCESS")
+            self._log(f"✅ Tersimpan: {out_path}", "SUCCESS")
             self._progress(100, "Selesai!")
             return out_path
-
         except Exception as e:
             self._log(f"❌ Download gagal: {e}", "ERROR")
-            self._debug_dump(page, "step8_download_failed")
+            self._debug_dump(page, "step8_failed")
             return None
