@@ -3,9 +3,10 @@ gmail_otp.py  —  GmailOTPReader
 Baca OTP dari Gmail secara otomatis via Google API.
 
 Fix:
-    - Cari OTP di folder SPAM juga (in:spam) karena email Google
-      sering masuk spam saat diteruskan via Firefox Relay.
-    - Mark as NOT SPAM + pindahkan ke inbox setelah ditemukan.
+    - Tambah subject: 'Gemini Enterprise verification code'
+    - Tambah sender: noreply-googlecloud@google.com
+    - Cari OTP di INBOX + SPAM sekaligus
+    - Auto pindah ke Inbox jika ketemu di Spam
 """
 import base64
 import os
@@ -22,14 +23,24 @@ from googleapiclient.discovery import build
 
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
+# ── Subject yang diketahui dari Gemini Enterprise ────────────────────────────
 OTP_SUBJECTS = [
-    '"Your verification code"',
-    '"Your code"',
-    '"One-time code"',
-    '"Sign in code"',
-    '"Gemini verification"',
-    '"verification code"',
-    '"sign in"',
+    "Gemini Enterprise verification code",   # ← EXACT subject yang diterima
+    "verification code",
+    "Your verification code",
+    "Your code",
+    "One-time code",
+    "Sign in code",
+    "Gemini verification",
+    "sign in",
+]
+
+# ── Sender yang diketahui dari Gemini Enterprise ──────────────────────────
+KNOWN_SENDERS = [
+    "noreply-googlecloud@google.com",         # ← sender EXACT dari Gemini Enterprise
+    "noreply@google.com",
+    "no-reply@accounts.google.com",
+    "googlecloud",                            # partial match untuk query Gmail
 ]
 
 IGNORE_SUBJECTS = [
@@ -106,28 +117,48 @@ class GmailOTPReader:
         """Ambil OTP dari body email."""
         try:
             msg  = self._svc().users().messages().get(userId="me", id=msg_id, format="full").execute()
+
+            # Log subject untuk debug
+            headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
+            self._log(f"   📧 From   : {headers.get('from', '-')}", "WARNING")
+            self._log(f"   📧 Subject: {headers.get('subject', '-')}", "WARNING")
+
+            # Skip email yang harus diabaikan
+            subj_lower = headers.get("subject", "").lower()
+            for ign in IGNORE_SUBJECTS:
+                if ign in subj_lower:
+                    self._log(f"   ⏭️  Diabaikan (subject: {ign})", "WARNING")
+                    return None
+
             body = self._decode_body(msg["payload"])
-        except Exception:
+
+        except Exception as e:
+            self._log(f"   ⚠️  Gagal ambil email: {e}", "WARNING")
             return None
 
         # Log cuplikan body untuk debug
-        snippet = body[:200].replace("\n", " ").strip()
-        self._log(f"   📌 Body snippet: {snippet}", "WARNING")
+        snippet = body[:300].replace("\n", " ").strip()
+        self._log(f"   📌 Body: {snippet}", "WARNING")
 
+        # ── Pattern OTP ─────────────────────────────────────────────────────
         for pattern in [
+            r'verification\s+code[:\s\n]+([0-9]{4,8})',
             r'Your\s+(?:verification\s+)?code\s+is[:\s]+([0-9]{4,8})',
             r'OTP[:\s]+([0-9]{4,8})',
             r'code[:\s]+([0-9]{4,8})',
-            r'\b([0-9]{6})\b',
-            r'\b([0-9]{4})\b',
+            r'\b([0-9]{6})\b',      # 6 digit (paling umum)
+            r'\b([0-9]{4})\b',      # 4 digit fallback
         ]:
             m = re.search(pattern, body, re.IGNORECASE)
             if m:
-                return m.group(1)
+                code = m.group(1)
+                self._log(f"   ✅ OTP pattern match: '{code}'", "WARNING")
+                return code
+
+        self._log("   ⚠️  Tidak ada angka OTP di body email", "WARNING")
         return None
 
     def _search_messages(self, query: str, max_results: int = 10) -> list:
-        """Cari pesan dengan query tertentu."""
         try:
             result = self._svc().users().messages().list(
                 userId="me", q=query, maxResults=max_results
@@ -137,7 +168,6 @@ class GmailOTPReader:
             return []
 
     def mark_as_read(self, msg_id: str):
-        """Tandai email sebagai sudah dibaca."""
         try:
             self._svc().users().messages().modify(
                 userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
@@ -146,10 +176,7 @@ class GmailOTPReader:
             pass
 
     def move_from_spam(self, msg_id: str):
-        """
-        Pindahkan email dari SPAM ke INBOX.
-        Otomatis dipanggil jika OTP ditemukan di folder spam.
-        """
+        """Pindahkan email dari SPAM ke INBOX."""
         try:
             self._svc().users().messages().modify(
                 userId="me",
@@ -165,7 +192,7 @@ class GmailOTPReader:
 
     def wait_for_otp(
         self,
-        sender:          str                = "google.com",
+        sender:          str                = "noreply-googlecloud@google.com",
         timeout:         int                = 120,
         interval:        int                = 5,
         log_callback:    Optional[Callable] = None,
@@ -178,27 +205,47 @@ class GmailOTPReader:
         ts_str    = datetime.datetime.fromtimestamp(after_timestamp).strftime("%H:%M:%S") if after_timestamp else "N/A"
         ts_filter = f" after:{max(0, after_timestamp - 60)}" if after_timestamp else ""
 
-        # ── Build query list: cek INBOX + SPAM sekaligus ──────────────────────────
+        # ── Build queries: prioritas dari yang paling spesifik ────────────────────
         queries = []
 
-        # Strategi 1: cari di semua folder (inbox + spam) by sender
+        # ── PRIORITAS 1: Subject EXACT "Gemini Enterprise verification code" ───
+        queries.append(("INBOX exact-subject",
+                        f'subject:"Gemini Enterprise verification code"{ts_filter}'))
+        queries.append(("SPAM exact-subject",
+                        f'in:spam subject:"Gemini Enterprise verification code"{ts_filter}'))
+
+        # ── PRIORITAS 2: Sender exact noreply-googlecloud ────────────────────
+        queries.append(("INBOX googlecloud-sender",
+                        f"from:noreply-googlecloud@google.com{ts_filter}"))
+        queries.append(("SPAM googlecloud-sender",
+                        f"in:spam from:noreply-googlecloud@google.com{ts_filter}"))
+
+        # ── PRIORITAS 3: by mask email (semua folder) ──────────────────────
         if mask_email:
-            queries.append(("INBOX+SPAM by mask" , f"to:{mask_email}{ts_filter}"))
-        queries.append(("INBOX+SPAM by sender", f"from:{sender}{ts_filter}"))
-        queries.append(("SPAM by sender"      , f"in:spam from:{sender}{ts_filter}"))
+            queries.append(("INBOX+SPAM by mask",
+                            f"to:{mask_email}{ts_filter}"))
+            queries.append(("SPAM by mask",
+                            f"in:spam to:{mask_email}{ts_filter}"))
 
-        # Strategi 2: cari by subject di semua + spam
-        for subj in OTP_SUBJECTS:
-            queries.append((f"subj:{subj}",       f"subject:{subj}{ts_filter}"))
-            queries.append((f"spam subj:{subj}",  f"in:spam subject:{subj}{ts_filter}"))
+        # ── PRIORITAS 4: Subject keywords lain ────────────────────────────
+        for subj in OTP_SUBJECTS[1:]:  # skip index 0 (sudah di atas)
+            queries.append((f"subj:{subj[:20]}",
+                            f'subject:"{subj}"{ts_filter}'))
+            queries.append((f"spam-subj:{subj[:20]}",
+                            f'in:spam subject:"{subj}"{ts_filter}'))
 
-        # Strategi 3: fallback broad
+        # ── FALLBACK: broad search di spam ────────────────────────────────
+        queries.append(("fallback:spam-googlecloud",
+                        f"in:spam from:googlecloud{ts_filter}"))
+        queries.append(("fallback:spam-google",
+                        f"in:spam from:google.com{ts_filter}"))
         if mask_email:
-            queries.append(("fallback to:mask", f"to:{mask_email}"))
-        queries.append(("fallback in:spam", f"in:spam from:google{ts_filter}"))
-        queries.append(("fallback any",     f"in:spam{ts_filter}"))
+            queries.append(("fallback:mask-no-ts", f"to:{mask_email}"))
 
-        self._log(f"📬 Polling Gmail | cutoff: {ts_str} | {len(queries)} strategi (INBOX+SPAM)", "WARNING")
+        self._log(
+            f"📬 Polling Gmail | cutoff: {ts_str} | {len(queries)} strategi | INBOX+SPAM",
+            "WARNING"
+        )
 
         start    = time.time()
         seen_ids = set()
@@ -217,11 +264,10 @@ class GmailOTPReader:
                         if 0 < msg_ts < (after_timestamp - 60):
                             continue
 
-                    self._log(f"   🔎 Cek email [{label}] id={mid[:8]}...")
+                    self._log(f"   🔎 [{label}] id={mid[:8]}...")
                     otp = self._extract_otp_code(mid)
                     if otp:
                         self.mark_as_read(mid)
-                        # Jika ditemukan di spam, pindah ke inbox
                         if "spam" in label.lower() or "spam" in q.lower():
                             self.move_from_spam(mid)
                         self._log(f"✅ OTP ditemukan: {otp}", "SUCCESS")
@@ -232,6 +278,5 @@ class GmailOTPReader:
             time.sleep(interval)
 
         raise TimeoutError(
-            f"❌ OTP timeout {timeout}s — email tidak ditemukan di Inbox maupun Spam.\n"
-            f"Pastikan Firefox Relay meneruskan email ke Gmail yang benar."
+            f"❌ OTP timeout {timeout}s — email tidak ditemukan di Inbox maupun Spam."
         )
