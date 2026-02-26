@@ -6,13 +6,7 @@ via Playwright.
 
 Mode operasi:
     1. SESSION MODE (prioritas)  : Load cookies dari session/gemini_session.json
-       → Tidak perlu login → Bypass reCAPTCHA sepenuhnya
     2. LOGIN MODE (fallback)     : Login otomatis via email + OTP
-       → Rentan reCAPTCHA jika IP di-flag Google
-
-Setup:
-    Jalankan save_session.py SEKALI untuk login manual dan simpan session.
-    Setelah itu Launcher.bat akan otomatis pakai session.
 """
 
 import os
@@ -27,8 +21,8 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 from App.gmail_otp import GmailOTPReader
 from App._stealth_compat import apply_stealth, stealth_info, STEALTH_VERSION
 
-GEMINI_LOGIN_URL  = "https://auth.business.gemini.google/login?continueUrl=https://business.gemini.google/"
-GEMINI_HOME_URL   = "https://business.gemini.google/"
+# ── URL: Buka homepage, biarkan Google redirect ke login otomatis ─────────────
+GEMINI_HOME_URL  = "https://business.gemini.google/"
 
 OTP_TIMEOUT       = 120
 VIDEO_GEN_TIMEOUT = 600
@@ -193,40 +187,32 @@ class GeminiEnterpriseProcessor(threading.Thread):
         return None
 
     def _has_valid_session(self) -> bool:
-        """Cek apakah file session ada dan tidak kosong."""
         if not os.path.exists(self.session_file):
             return False
         try:
             with open(self.session_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             cookies = data.get("cookies", [])
-            if len(cookies) == 0:
-                return False
-            # Cek apakah ada cookie Google yang valid
             google_cookies = [c for c in cookies if ".google.com" in c.get("domain", "")]
             return len(google_cookies) > 0
         except Exception:
             return False
 
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────
     def run(self):
         os.makedirs(self.output_dir, exist_ok=True)
 
-        # Log stealth info
         if STEALTH_VERSION:
             self._log(f"✅ Anti-bot aktif: {stealth_info()}", "SUCCESS")
         else:
             self._log("⚠️  playwright-stealth tidak tersedia", "WARNING")
 
-        # Cek session
         use_session = self._has_valid_session()
         if use_session:
-            self._log(f"🔑 Session ditemukan: {self.session_file}", "SUCCESS")
-            self._log("   → Mode: SESSION (bypass login + reCAPTCHA)", "SUCCESS")
+            self._log(f"🔑 Session ditemukan → Mode: SESSION (skip login)", "SUCCESS")
         else:
-            self._log("⚠️  Session tidak ditemukan!", "WARNING")
-            self._log("   → Mode: LOGIN OTOMATIS (rentan reCAPTCHA)", "WARNING")
-            self._log("   → Jalankan save_session.py untuk login manual sekali.", "WARNING")
+            self._log("⚠️  Session tidak ada → Mode: LOGIN OTOMATIS", "WARNING")
+            self._log("   → Jalankan Save_Session.bat jika sering gagal.", "WARNING")
 
         try:
             with sync_playwright() as pw:
@@ -268,7 +254,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
                         browser = pw.chromium.launch(**launch_kwargs)
                         self._log("💻 Pakai Chromium (fallback)", "WARNING")
 
-                # ── Buat context ──
                 ctx_kwargs = dict(
                     viewport={"width": random.randint(1280, 1440), "height": random.randint(860, 960)},
                     user_agent=(
@@ -289,7 +274,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
                     }
                 )
 
-                # Inject saved session jika ada
                 if use_session:
                     ctx_kwargs["storage_state"] = self.session_file
 
@@ -316,69 +300,80 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._log(f"❌ Fatal error: {e}", "ERROR")
             self._done(False, str(e))
 
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────
     def _run_session(self, page, use_session: bool = False) -> Optional[str]:
 
-        # ── 1. Navigasi ke Gemini ─────────────────────────────────
         self._progress(5, "Membuka Gemini Enterprise...")
+        self._log("🌐 Membuka https://business.gemini.google/ ...")
 
         if use_session:
-            # Langsung ke halaman utama, skip login
-            self._log("🌐 Membuka Gemini Enterprise (session mode)...")
+            # Session mode: buka homepage, Google langsung masuk tanpa login
             page.goto(GEMINI_HOME_URL, wait_until="networkidle", timeout=40_000)
             page.wait_for_timeout(random.randint(2000, 3500))
 
             current_url = page.url
             self._log(f"   URL: {current_url}")
 
-            # Cek apakah session masih valid
-            if "signin" in current_url or "login" in current_url or "accounts.google" in current_url:
-                self._log("⚠️  Session sudah expired! Perlu login ulang.", "WARNING")
-                self._log("   → Jalankan: python save_session.py", "WARNING")
+            if any(x in current_url for x in ["signin", "login", "accounts.google"]):
+                self._log("⚠️  Session expired! Fallback ke login otomatis...", "WARNING")
+                self._log("   → Jalankan Save_Session.bat untuk perbarui session.", "WARNING")
                 self._debug_dump(page, "session_expired")
-                # Fallback ke login mode
-                self._log("🔄 Mencoba login otomatis sebagai fallback...", "WARNING")
                 use_session = False
             else:
                 self._log("✅ Session valid! Langsung ke dashboard.", "SUCCESS")
                 self._progress(50, "Session OK, buka menu Veo...")
                 return self._run_veo(page)
 
-        # ── Mode LOGIN OTOMATIS (fallback jika session tidak ada/expired) ──
-        self._log("🌐 Membuka halaman login Gemini Enterprise...")
-
-        # Warm up
+        # ── LOGIN OTOMATIS ─────────────────────────────────────────
+        # Warm up: buka google.com dulu
         page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=20_000)
         page.wait_for_timeout(random.randint(1800, 3000))
         page.mouse.wheel(0, random.randint(100, 300))
         page.wait_for_timeout(random.randint(500, 1000))
 
-        page.goto(GEMINI_LOGIN_URL, wait_until="networkidle", timeout=40_000)
+        # Buka business.gemini.google → akan redirect otomatis ke halaman login
+        self._log("   → Buka business.gemini.google, tunggu redirect ke login...")
+        page.goto(GEMINI_HOME_URL, wait_until="networkidle", timeout=40_000)
         page.wait_for_timeout(random.randint(2500, 4000))
 
         current_url = page.url
-        self._log(f"   URL: {current_url}")
+        self._log(f"   URL setelah redirect: {current_url}")
+        self._debug_dump(page, "step1_after_redirect")
 
-        if "signin-error" in current_url or "try something else" in page.content():
-            self._log("❌ Bot terdeteksi / login error!", "ERROR")
-            self._log("   → Solusi: Jalankan python save_session.py untuk login manual.", "WARNING")
-            self._debug_dump(page, "step1_error")
+        # Cek error page
+        page_content = page.content()
+        if "try something else" in page_content.lower() or "let's try" in page_content.lower():
+            self._log("❌ Halaman error terdeteksi sebelum input email!", "ERROR")
+            self._log("   → Coba jalankan Save_Session.bat lalu Launcher.bat", "WARNING")
             return None
 
         if self._cancelled: return None
 
-        # ── Input email ───────────────────────────────────────────
-        self._log("📧 Mencari field email...")
-        self._progress(10, "Input email...")
+        # ── Tunggu sampai halaman login muncul ────────────────────────
+        self._log("📧 Menunggu form email muncul...")
+        self._progress(10, "Menunggu form login...")
+
+        # Tunggu redirect selesai dan form email muncul
+        try:
+            page.wait_for_selector(
+                ", ".join(EMAIL_SELECTORS[:5]),
+                timeout=20_000
+            )
+            self._log("   ✅ Form login terdeteksi")
+        except PWTimeout:
+            self._log("⚠️  Form email tidak muncul dalam 20 detik", "WARNING")
+            self._log(f"   URL saat ini: {page.url}")
+
         self._log_all_inputs(page)
 
-        email_input = self._find_input(page, EMAIL_SELECTORS, timeout_ms=15_000)
+        email_input = self._find_input(page, EMAIL_SELECTORS, timeout_ms=10_000)
         if not email_input:
             self._log("❌ Input email tidak ditemukan!", "ERROR")
-            self._debug_dump(page, "step2_email_not_found")
+            self._debug_dump(page, "step2_no_email")
             return None
 
-        self._log(f"📧 Mengetik email: {self.mask_email}")
+        # ── Input email ──────────────────────────────────────────
+        self._log(f"📧 Input email: {self.mask_email}")
         try:
             email_input.scroll_into_view_if_needed()
             page.wait_for_timeout(random.randint(400, 800))
@@ -410,15 +405,16 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._log("✅ Email tersubmit, menunggu respons...")
             page.wait_for_timeout(random.randint(3000, 5000))
 
-            if "signin-error" in page.url or "try something else" in page.content():
-                self._log("❌ Google mendeteksi bot / reCAPTCHA block!", "ERROR")
-                self._log("   → Solusi: Jalankan python save_session.py", "WARNING")
+            page_content = page.content().lower()
+            if "try something else" in page_content or "let's try" in page_content or "signin-error" in page.url:
+                self._log("❌ Masih terdeteksi bot / email error!", "ERROR")
+                self._log("   → Jalankan Save_Session.bat untuk login manual.", "WARNING")
                 self._debug_dump(page, "step2_bot_detected")
                 return None
 
         except Exception as e:
             self._log(f"❌ Error input email: {e}", "ERROR")
-            self._debug_dump(page, "step2_email_error")
+            self._debug_dump(page, "step2_error")
             return None
 
         if self._cancelled: return None
@@ -456,7 +452,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
         if not otp_code:
             self._log("❌ Gagal dapat OTP!", "ERROR")
-            self._debug_dump(page, "step3_otp_failed")
+            self._debug_dump(page, "step3_failed")
             return None
         if self._cancelled: return None
 
@@ -488,30 +484,28 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 page.keyboard.press("Enter")
 
             self._log("✅ OTP tersubmit, menunggu redirect...")
-            page.wait_for_url("**/business.gemini.google/**", timeout=25_000)
+            page.wait_for_url("*business.gemini.google*", timeout=25_000)
             self._log("✅ Login berhasil!", "SUCCESS")
 
-            # Simpan session baru setelah login berhasil
+            # Auto-save session
             try:
                 os.makedirs(os.path.dirname(self.session_file), exist_ok=True)
                 page.context.storage_state(path=self.session_file)
-                self._log(f"💾 Session otomatis tersimpan: {self.session_file}", "SUCCESS")
+                self._log(f"💾 Session tersimpan: {self.session_file}", "SUCCESS")
             except Exception as se:
                 self._log(f"⚠️  Gagal simpan session: {se}", "WARNING")
 
         except PWTimeout:
             self._log("❌ Login gagal — redirect timeout!", "ERROR")
-            self._debug_dump(page, "step4_otp_failed")
+            self._debug_dump(page, "step4_failed")
             return None
         if self._cancelled: return None
 
         return self._run_veo(page)
 
-    # ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────
     def _run_veo(self, page) -> Optional[str]:
-        """Klik menu Veo, input prompt, polling, download."""
 
-        # ── Klik tools → Veo ───────────────────────────────────────
         self._progress(50, "Membuka menu Veo...")
         self._log("🎬 Mencari tombol tools...")
         page.wait_for_timeout(random.randint(2500, 4000))
@@ -603,7 +597,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
             return None
         if self._cancelled: return None
 
-        # ── Polling ────────────────────────────────────────────────
+        # ── Polling video ─────────────────────────────────────────
         self._progress(70, "Menunggu Veo generate...")
         self._log(f"⏳ Polling max {VIDEO_GEN_TIMEOUT}s...")
         start = time.time()
@@ -612,8 +606,10 @@ class GeminiEnterpriseProcessor(threading.Thread):
         while time.time() - start < VIDEO_GEN_TIMEOUT:
             if self._cancelled: return None
             elapsed = int(time.time() - start)
-            self._progress(min(70 + int((elapsed / VIDEO_GEN_TIMEOUT) * 18), 88),
-                           f"Generate... {elapsed}s/{VIDEO_GEN_TIMEOUT}s")
+            self._progress(
+                min(70 + int((elapsed / VIDEO_GEN_TIMEOUT) * 18), 88),
+                f"Generate... {elapsed}s/{VIDEO_GEN_TIMEOUT}s"
+            )
             dl = page.query_selector("button:has-text('Download'), a[download], button[aria-label*='download' i]")
             if dl:
                 video_ready = True; break
