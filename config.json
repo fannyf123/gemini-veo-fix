@@ -1,7 +1,8 @@
 {
-  "relay_api_key": "YOUR_FIREFOX_RELAY_API_KEY",
-  "output_dir": "",
-  "headless": false,
-  "max_workers": 1,
+  "mask_email":          "ISI_EMAIL_MASK_MOZMAIL_DISINI",
+  "relay_api_key":       "",
+  "output_dir":          "",
+  "headless":            false,
+  "max_workers":         1,
   "batch_stagger_delay": 15
 }

@@ -1,6 +1,6 @@
 # 🎬 Gemini Veo Tester
 
-**Otomasi generate video via [business.gemini.google](https://business.gemini.google) menggunakan Playwright + Firefox Relay OTP**
+**Otomasi generate video via [business.gemini.google](https://business.gemini.google) menggunakan Playwright + OTP Gmail**
 
 > ⚠️ Repo ini untuk keperluan **testing / eksperimen pribadi**.
 
@@ -9,15 +9,14 @@
 ## ✨ Cara Kerja
 
 ```
-1. Firefox Relay  → buat email mask sementara
-2. Playwright     → buka auth.business.gemini.google/login
-3. Input email mask → request OTP
-4. Gmail API      → baca OTP otomatis
-5. Submit OTP     → masuk dashboard Gemini Enterprise
-6. Klik "+" → "Create videos with Veo"
-7. Input prompt dari prompts.txt
-8. Polling → tunggu video selesai di-generate
-9. Download → simpan ke OUTPUT_GEMINI/
+1. Playwright     → buka auth.business.gemini.google/login
+2. Input email mask (dari config.json) → request OTP
+3. Gmail API      → baca OTP otomatis (cari di Inbox + Spam)
+4. Submit OTP     → masuk dashboard Gemini Enterprise
+5. Klik "+" → "Create videos with Veo"
+6. Input prompt dari prompts.txt
+7. Polling → tunggu video selesai di-generate
+8. Download → simpan ke OUTPUT_GEMINI/
 ```
 
 ---
@@ -25,8 +24,9 @@
 ## 📦 Requirements
 
 - Python **3.10+**
-- Firefox Relay API Key → [relay.firefox.com](https://relay.firefox.com)
+- **Google Chrome** terinstall (wajib, untuk bypass bot-detection)
 - Gmail + Google API `credentials.json`
+- Email mask Firefox Relay yang sudah ada
 
 ---
 
@@ -47,19 +47,20 @@ playwright install chromium
 ### 3. Setup Gmail OAuth
 Letakkan `credentials.json` (Gmail API) di root folder.
 
-### 4. Isi config.json
+### 4. Isi `config.json`
 ```json
 {
-  "relay_api_key": "ISI_API_KEY_FIREFOX_RELAY",
-  "output_dir": "",
-  "headless": false,
-  "max_workers": 1,
-  "batch_stagger_delay": 15
+  "mask_email":  "namaemailkamu@mozmail.com",
+  "relay_api_key": "",
+  "output_dir":  "",
+  "headless":    false,
+  "max_workers": 1
 }
 ```
-> Set `headless: false` dulu saat testing agar bisa melihat browser secara langsung.
+> Isi `mask_email` dengan email mask yang sudah ada di [relay.firefox.com/accounts/masks](https://relay.firefox.com/accounts/masks/).
+> `relay_api_key` tidak wajib diisi.
 
-### 5. Isi prompts.txt
+### 5. Isi `prompts.txt`
 ```
 A cinematic aerial shot of rice fields in Bali at golden hour
 A futuristic city at night with neon lights, rain, slow motion
@@ -68,14 +69,25 @@ Satu prompt per baris.
 
 ### 6. Jalankan
 ```bash
-# Windows
-Launcher.bat
+Launcher.bat        # Windows
+bash Launcher.sh    # Linux/macOS
+python main.py      # Manual
+```
 
-# Linux / macOS
-bash Launcher.sh
+---
 
-# Atau langsung
-python main.py
+## ⚠️ Catatan Penting
+
+### OTP Masuk Spam?
+**Normal.** Kode sudah otomatis mencari OTP di folder **Inbox DAN Spam** sekaligus.
+Email dari Google via Firefox Relay sering masuk spam.
+Jika ditemukan di spam, email otomatis dipindahkan ke Inbox.
+
+### Google Mendeteksi Bot?
+Pastikan **Google Chrome** sudah terinstall. Kode memprioritaskan Chrome asli dibanding Chromium untuk menghindari bot-detection.
+```bash
+# Cek Chrome tersedia untuk Playwright:
+python -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(channel='chrome'); print('Chrome OK'); b.close(); p.stop()"
 ```
 
 ---
@@ -86,12 +98,12 @@ python main.py
 gemini-veo-tester/
 ├── App/
 │   ├── __init__.py
-│   ├── firefox_relay.py       # Firefox Relay API wrapper
-│   ├── gmail_otp.py           # Gmail OTP reader
-│   ├── gemini_enterprise.py   # Core: Playwright automation
+│   ├── firefox_relay.py       # Firefox Relay API wrapper (opsional)
+│   ├── gmail_otp.py           # Gmail OTP reader (cari di Inbox+Spam)
+│   ├── gemini_enterprise.py   # Core: Playwright automation + anti-bot
 │   └── gemini_batch.py        # Batch multi-prompt processor
 ├── main.py                    # Entry point (CLI)
-├── config.json                # Konfigurasi
+├── config.json                # Konfigurasi (isi mask_email)
 ├── prompts.txt                # Daftar prompt video
 ├── credentials.json           # (tidak di-commit) Gmail API
 ├── requirements.txt
@@ -103,16 +115,11 @@ gemini-veo-tester/
 
 ## ⚙️ Config
 
-| Key | Default | Keterangan |
-|---|---|---|
-| `relay_api_key` | — | Firefox Relay API key |
-| `output_dir` | `OUTPUT_GEMINI/` | Folder simpan video |
-| `headless` | `false` | `false` = browser terlihat (recommended saat debug) |
-| `max_workers` | `1` | Jumlah prompt paralel |
-| `batch_stagger_delay` | `15` | Jeda (detik) antar worker |
-
----
-
-## ⚠️ Disclaimer
-
-Repo ini dibuat untuk **eksperimen / riset pribadi**. Gunakan dengan bijak dan sesuai Terms of Service platform terkait.
+| Key | Keterangan |
+|---|---|
+| `mask_email` | **Wajib.** Email mask mozmail.com yang sudah ada |
+| `relay_api_key` | Tidak wajib (tidak dipakai untuk generate) |
+| `output_dir` | Folder simpan video (kosong = pakai `OUTPUT_GEMINI/`) |
+| `headless` | `false` = browser terlihat (recommended saat debug) |
+| `max_workers` | Jumlah prompt paralel (default: 1) |
+| `batch_stagger_delay` | Jeda detik antar worker batch |

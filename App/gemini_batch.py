@@ -1,7 +1,7 @@
 """
 gemini_batch.py  —  GeminiBatchProcessor
 Jalankan banyak prompt generate video Gemini secara paralel.
-Setiap worker pakai email mask baru dari Firefox Relay.
+Semua worker pakai email mask yang sama dari config (fixed_mask_email).
 """
 
 import threading
@@ -9,7 +9,6 @@ import time
 from typing import List, Callable, Optional
 
 from App.gemini_enterprise import GeminiEnterpriseProcessor
-from App.firefox_relay import FirefoxRelay
 
 GEMINI_MAX_WORKERS = 3
 
@@ -48,50 +47,42 @@ class GeminiBatchProcessor(threading.Thread):
         for w in self._workers: w.cancel()
 
     def run(self):
-        relay_key  = self.config.get("relay_api_key", "")
+        # Pakai mask tetap dari config, tidak buat baru
+        mask_email = self.config.get("fixed_mask_email") or self.config.get("mask_email", "")
         output_dir = self.config.get("output_dir", "")
         stagger    = self.config.get("batch_stagger_delay", 15)
         max_w      = min(self.config.get("max_workers", GEMINI_MAX_WORKERS), GEMINI_MAX_WORKERS)
-        relay      = FirefoxRelay(relay_key)
         total      = len(self.prompts)
         done       = [0]
         threads    = []
         semaphore  = threading.Semaphore(max_w)
 
         self._log("-" * 52)
-        self._log(f"GEMINI BATCH START — {total} prompt(s) | max {max_w} worker", "SUCCESS")
+        self._log(f"GEMINI BATCH START — {total} prompt(s) | {max_w} worker | mask: {mask_email}", "SUCCESS")
         self._log("-" * 52)
 
         def run_single(idx, prompt):
             with semaphore:
                 if self._cancelled: return
-                try:
-                    mask_data  = relay.create_mask(label=f"gemini-{idx+1}")
-                    mask_email = mask_data["full_address"]
-                    mask_id    = mask_data["id"]
-                    self._log(f"[Worker {idx+1}] 📧 Mask: {mask_email}")
-                except Exception as e:
-                    self._log(f"[Worker {idx+1}] ❌ Gagal buat mask: {e}", "ERROR")
-                    with self._lock: self._results[idx] = None
-                    return
+                self._log(f"[Worker {idx+1}] 📧 Pakai mask: {mask_email}")
 
-                def wlog(msg, level="INFO"):  self.log_cb(f"[W{idx+1}] {msg}", level)
+                def wlog(msg, level="INFO"): self.log_cb(f"[W{idx+1}] {msg}", level)
                 def wdone(ok, msg, path):
                     with self._lock:
                         self._results[idx] = path if ok else None
                         done[0] += 1
-                    self.log_cb(f"[W{idx+1}] {'✅' if ok else '❌'} {msg}", "SUCCESS" if ok else "ERROR")
-                    pct = int((done[0] / total) * 100)
-                    self._progress(pct, f"{done[0]}/{total} video selesai")
-                    # Hapus mask setelah selesai
-                    try: relay.delete_mask(mask_id)
-                    except: pass
+                    self.log_cb(f"[W{idx+1}] {'✅' if ok else '❌'} {msg}",
+                                "SUCCESS" if ok else "ERROR")
+                    self._progress(int((done[0] / total) * 100),
+                                   f"{done[0]}/{total} video selesai")
                     if done[0] == total: self._finalize()
 
                 proc = GeminiEnterpriseProcessor(
                     base_dir=self.base_dir, prompt=prompt,
-                    mask_email=mask_email, output_dir=output_dir,
-                    config=self.config, log_callback=wlog,
+                    mask_email=mask_email,
+                    output_dir=output_dir,
+                    config=self.config,
+                    log_callback=wlog,
                     finished_callback=wdone,
                 )
                 with self._lock: self._workers.append(proc)
@@ -117,4 +108,6 @@ class GeminiBatchProcessor(threading.Thread):
         for p in ok_list: self._log(f"   → {p}")
         self._log("-" * 52)
         if self.finished_cb:
-            self.finished_cb(bool(ok_list), f"{len(ok_list)}/{len(self._results)} berhasil", ";".join(ok_list))
+            self.finished_cb(bool(ok_list),
+                             f"{len(ok_list)}/{len(self._results)} berhasil",
+                             ";".join(ok_list))

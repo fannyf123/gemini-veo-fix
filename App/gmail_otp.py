@@ -1,6 +1,11 @@
 """
 gmail_otp.py  —  GmailOTPReader
 Baca OTP dari Gmail secara otomatis via Google API.
+
+Fix:
+    - Cari OTP di folder SPAM juga (in:spam) karena email Google
+      sering masuk spam saat diteruskan via Firefox Relay.
+    - Mark as NOT SPAM + pindahkan ke inbox setelah ditemukan.
 """
 import base64
 import os
@@ -23,6 +28,8 @@ OTP_SUBJECTS = [
     '"One-time code"',
     '"Sign in code"',
     '"Gemini verification"',
+    '"verification code"',
+    '"sign in"',
 ]
 
 IGNORE_SUBJECTS = [
@@ -96,11 +103,17 @@ class GmailOTPReader:
         return body
 
     def _extract_otp_code(self, msg_id: str) -> Optional[str]:
+        """Ambil OTP dari body email."""
         try:
             msg  = self._svc().users().messages().get(userId="me", id=msg_id, format="full").execute()
             body = self._decode_body(msg["payload"])
         except Exception:
             return None
+
+        # Log cuplikan body untuk debug
+        snippet = body[:200].replace("\n", " ").strip()
+        self._log(f"   📌 Body snippet: {snippet}", "WARNING")
+
         for pattern in [
             r'Your\s+(?:verification\s+)?code\s+is[:\s]+([0-9]{4,8})',
             r'OTP[:\s]+([0-9]{4,8})',
@@ -113,7 +126,8 @@ class GmailOTPReader:
                 return m.group(1)
         return None
 
-    def _search_messages(self, query: str, max_results: int = 5) -> list:
+    def _search_messages(self, query: str, max_results: int = 10) -> list:
+        """Cari pesan dengan query tertentu."""
         try:
             result = self._svc().users().messages().list(
                 userId="me", q=query, maxResults=max_results
@@ -123,12 +137,31 @@ class GmailOTPReader:
             return []
 
     def mark_as_read(self, msg_id: str):
+        """Tandai email sebagai sudah dibaca."""
         try:
             self._svc().users().messages().modify(
                 userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
             ).execute()
         except Exception:
             pass
+
+    def move_from_spam(self, msg_id: str):
+        """
+        Pindahkan email dari SPAM ke INBOX.
+        Otomatis dipanggil jika OTP ditemukan di folder spam.
+        """
+        try:
+            self._svc().users().messages().modify(
+                userId="me",
+                id=msg_id,
+                body={
+                    "removeLabelIds": ["SPAM"],
+                    "addLabelIds":    ["INBOX"],
+                }
+            ).execute()
+            self._log("📥 Email dipindahkan dari SPAM → INBOX", "WARNING")
+        except Exception as e:
+            self._log(f"⚠️  Gagal pindah dari spam: {e}", "WARNING")
 
     def wait_for_otp(
         self,
@@ -142,39 +175,63 @@ class GmailOTPReader:
         self._log_cb = log_callback
         self._svc()
 
-        ts_str   = datetime.datetime.fromtimestamp(after_timestamp).strftime("%H:%M:%S") if after_timestamp else "N/A"
-        queries  = []
+        ts_str    = datetime.datetime.fromtimestamp(after_timestamp).strftime("%H:%M:%S") if after_timestamp else "N/A"
         ts_filter = f" after:{max(0, after_timestamp - 60)}" if after_timestamp else ""
 
-        if mask_email:
-            queries.append(f"to:{mask_email} is:unread{ts_filter}")
-        queries.append(f"from:{sender} is:unread{ts_filter}")
-        for subj in OTP_SUBJECTS:
-            queries.append(f"subject:{subj} is:unread{ts_filter}")
+        # ── Build query list: cek INBOX + SPAM sekaligus ──────────────────────────
+        queries = []
 
-        self._log(f"📬 Polling Gmail | cutoff: {ts_str} | {len(queries)} strategi")
+        # Strategi 1: cari di semua folder (inbox + spam) by sender
+        if mask_email:
+            queries.append(("INBOX+SPAM by mask" , f"to:{mask_email}{ts_filter}"))
+        queries.append(("INBOX+SPAM by sender", f"from:{sender}{ts_filter}"))
+        queries.append(("SPAM by sender"      , f"in:spam from:{sender}{ts_filter}"))
+
+        # Strategi 2: cari by subject di semua + spam
+        for subj in OTP_SUBJECTS:
+            queries.append((f"subj:{subj}",       f"subject:{subj}{ts_filter}"))
+            queries.append((f"spam subj:{subj}",  f"in:spam subject:{subj}{ts_filter}"))
+
+        # Strategi 3: fallback broad
+        if mask_email:
+            queries.append(("fallback to:mask", f"to:{mask_email}"))
+        queries.append(("fallback in:spam", f"in:spam from:google{ts_filter}"))
+        queries.append(("fallback any",     f"in:spam{ts_filter}"))
+
+        self._log(f"📬 Polling Gmail | cutoff: {ts_str} | {len(queries)} strategi (INBOX+SPAM)", "WARNING")
 
         start    = time.time()
         seen_ids = set()
 
         while time.time() - start < timeout:
-            for q in queries:
+            for label, q in queries:
                 ids = self._search_messages(q)
                 for mid in ids:
                     if mid in seen_ids:
                         continue
                     seen_ids.add(mid)
+
+                    # Filter timestamp
                     if after_timestamp:
                         msg_ts = self._get_message_timestamp(mid)
                         if 0 < msg_ts < (after_timestamp - 60):
                             continue
+
+                    self._log(f"   🔎 Cek email [{label}] id={mid[:8]}...")
                     otp = self._extract_otp_code(mid)
                     if otp:
                         self.mark_as_read(mid)
+                        # Jika ditemukan di spam, pindah ke inbox
+                        if "spam" in label.lower() or "spam" in q.lower():
+                            self.move_from_spam(mid)
                         self._log(f"✅ OTP ditemukan: {otp}", "SUCCESS")
                         return otp
+
             elapsed = int(time.time() - start)
             self._log(f"⏳ Polling... {elapsed}s/{timeout}s")
             time.sleep(interval)
 
-        raise TimeoutError(f"❌ OTP timeout {timeout}s — pastikan Firefox Relay meneruskan ke Gmail.")
+        raise TimeoutError(
+            f"❌ OTP timeout {timeout}s — email tidak ditemukan di Inbox maupun Spam.\n"
+            f"Pastikan Firefox Relay meneruskan email ke Gmail yang benar."
+        )
