@@ -1,25 +1,58 @@
 """
-save_session.py  —  Login manual ke Gemini Enterprise, simpan session (format Selenium/UC)
+save_session.py  —  Login manual ke Gemini Enterprise, simpan session
 
 Cara pakai:
     python save_session.py  (atau klik Save_Session.bat)
-
-1. Browser Chrome (undetected) akan terbuka
-2. Login MANUAL (ketik email + OTP sendiri)
-3. Setelah halaman business.gemini.google terbuka, tekan Enter di terminal
-4. Session (cookies) tersimpan di: session/gemini_session.json
 """
 
 import os
 import sys
+import re
 import json
 import time
-import tempfile
 import shutil
+import tempfile
+import subprocess
 
 SESSION_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session")
 SESSION_FILE = os.path.join(SESSION_DIR, "gemini_session.json")
 GEMINI_HOME  = "https://business.gemini.google/"
+
+CHROME_PATHS = [
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    os.path.expanduser(r"~\AppData\Local\Google\Chrome\Application\chrome.exe"),
+]
+
+
+def get_chrome_version():
+    try:
+        import winreg
+        for key_path in [
+            r"SOFTWARE\Google\Chrome\BLBeacon",
+            r"SOFTWARE\Wow6432Node\Google\Chrome\BLBeacon",
+        ]:
+            for hive in [winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE]:
+                try:
+                    key = winreg.OpenKey(hive, key_path)
+                    ver, _ = winreg.QueryValueEx(key, "version")
+                    return int(ver.split(".")[0])
+                except Exception:
+                    pass
+    except ImportError:
+        pass
+
+    for path in CHROME_PATHS:
+        if os.path.exists(path):
+            try:
+                result = subprocess.run([path, "--version"],
+                    capture_output=True, text=True, timeout=5)
+                m = re.search(r"(\d+)\.\d+\.\d+\.\d+", result.stdout)
+                if m:
+                    return int(m.group(1))
+            except Exception:
+                pass
+    return None
 
 
 def main():
@@ -27,23 +60,27 @@ def main():
         import undetected_chromedriver as uc
     except ImportError:
         print("[ERR] undetected-chromedriver tidak terinstall!")
-        print("      Jalankan: pip install undetected-chromedriver selenium")
+        print("      pip install undetected-chromedriver selenium")
         sys.exit(1)
 
     os.makedirs(SESSION_DIR, exist_ok=True)
 
+    chrome_ver = get_chrome_version()
+
     print()
     print("=" * 55)
-    print("  Gemini Session Saver (undetected-chromedriver)")
+    print("  Gemini Session Saver")
     print("=" * 55)
+    if chrome_ver:
+        print(f"[INFO] Chrome versi terdeteksi: {chrome_ver}")
+    else:
+        print("[WRN] Versi Chrome tidak terdeteksi (akan auto-detect)")
     print()
-    print("[INFO] Browser Chrome akan terbuka dengan fresh profile.")
-    print("[INFO] Login MANUAL seperti biasa di browser.")
+    print("[INFO] Browser akan terbuka. Login MANUAL seperti biasa.")
     print("[INFO] Setelah masuk ke business.gemini.google,")
     print("       kembali ke sini dan tekan ENTER.")
     print()
 
-    # Fresh temp profile
     temp_profile = tempfile.mkdtemp(prefix="gemini_save_session_")
     print(f"[INFO] Temp profile: {temp_profile}")
     print()
@@ -59,7 +96,35 @@ def main():
 
     driver = None
     try:
-        driver = uc.Chrome(options=options, use_subprocess=True)
+        # Coba dengan versi yang terdeteksi, fallback auto
+        versions_to_try = ([chrome_ver, None] if chrome_ver else [None])
+        for ver in versions_to_try:
+            try:
+                ver_label = str(ver) if ver else "auto"
+                print(f"[INFO] Mencoba UC version_main={ver_label}...")
+                driver = uc.Chrome(options=options, use_subprocess=True, version_main=ver)
+                print(f"[OK]  UC driver berhasil (version_main={ver_label})")
+                break
+            except Exception as e:
+                err = str(e)
+                print(f"[WRN] version_main={ver_label} gagal: {err[:100]}")
+                # Coba parse versi dari error message
+                m = re.search(r"Current browser version is (\d+)", err)
+                if m:
+                    detected = int(m.group(1))
+                    print(f"[INFO] Retry dengan version_main={detected} dari error msg...")
+                    try:
+                        driver = uc.Chrome(options=options, use_subprocess=True, version_main=detected)
+                        print(f"[OK]  UC driver berhasil (version_main={detected})")
+                        break
+                    except Exception as e2:
+                        print(f"[ERR] Juga gagal: {str(e2)[:80]}")
+                driver = None
+
+        if driver is None:
+            print("[ERR] Gagal membuat UC driver!")
+            return
+
         driver.execute_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
@@ -74,16 +139,14 @@ def main():
         print()
 
         current = driver.current_url
-        print(f"[INFO] URL saat ini: {current}")
+        print(f"[INFO] URL: {current}")
 
         if "business.gemini.google" not in current:
-            print("[WRN] Sepertinya belum di halaman Gemini.")
-            confirm = input(">>> Lanjut simpan session? (y/n): ").strip().lower()
+            confirm = input(">>> Belum di halaman Gemini. Tetap simpan? (y/n): ").strip().lower()
             if confirm != "y":
                 print("[INFO] Dibatalkan.")
                 return
 
-        # Ambil semua cookies dari driver
         cookies = driver.get_cookies()
         with open(SESSION_FILE, "w", encoding="utf-8") as f:
             json.dump(cookies, f, indent=2)
@@ -93,7 +156,7 @@ def main():
         print(f"[OK]  Total cookies     : {len(cookies)}")
         print(f"[OK]  Google cookies    : {len(google_ck)}")
         print()
-        print("[DONE] Jalankan Launcher.bat untuk generate video.")
+        print("[DONE] Sekarang jalankan Launcher.bat")
 
     except Exception as e:
         print(f"[ERR] {e}")
@@ -101,15 +164,10 @@ def main():
         traceback.print_exc()
     finally:
         try:
-            if driver:
-                driver.quit()
+            if driver: driver.quit()
         except Exception:
             pass
-        # Bersihkan temp profile
-        try:
-            shutil.rmtree(temp_profile, ignore_errors=True)
-        except Exception:
-            pass
+        shutil.rmtree(temp_profile, ignore_errors=True)
 
 
 if __name__ == "__main__":
