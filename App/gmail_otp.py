@@ -5,17 +5,19 @@ Baca OTP dari Gmail secara otomatis via Google API.
 Khusus untuk Gemini Enterprise (Google Cloud OTP).
 
 Strategi ekstraksi OTP (berurutan, berhenti di yang pertama berhasil):
-  1. HTML-first: cari elemen <td>/<div>/<p> dengan font-size besar (>= 20px)
-     atau warna teks biru (#4285f4, #1a73e8, dll) — kolom OTP Google persis ini
-  2. HTML-first: cari elemen yang HANYA berisi teks 4-8 karakter alphanumeric
-     (tanpa spasi, tanpa kata lain) — blok kode mandiri
+  1. HTML-first: cari <span>/<td>/<div> dengan font-size >= 20px
+     atau background-color khusus blok kode (biru muda, abu, dll)
+     atau color yang merupakan warna kode OTP Google / Gemini
+  2. HTML-first: cari elemen STANDALONE yang HANYA berisi 4-8 char alphanumeric
   3. Regex di plain-text AFTER strip header Firefox Relay
      — hanya angka murni 6-digit atau pola eksplisit "code is: XXXX"
-     — SKIP kata bahasa Inggris (THIS, THAT, FROM, ...) via kamus stopword
+     — SKIP kata bahasa Inggris UMUM via stopword list
      — SKIP angka dalam konteks copyright/footer
 
-Tidak ada lagi fallback broad r'\\b([A-Z0-9]{6})\\b' yang menyebabkan
-false positive seperti "THIS", "THAT", "ALIAS", dll.
+Catatan penting:
+  - _is_english_word() HANYA dipakai di plain-text fallback (strategi 3)
+  - Untuk strategi 1 & 2 (HTML), pure-alpha OTP seperti FPXSBS TETAP valid
+    karena sudah difilter oleh HTML context (font besar / background khusus)
 """
 import base64
 import os
@@ -37,43 +39,53 @@ IGNORE_SUBJECTS = [
     "subscription", "announcement",
 ]
 
-# Warna biru yang dipakai Google di blok OTP
-GOOGLE_BLUE_COLORS = {
+# ── Warna yang dipakai Google / Gemini di blok OTP ────────────────────────
+# Termasuk navy dark blue (#1c3a70) yang dipakai Gemini Enterprise
+# dan warna-warna lain yang umum di email transaksional Google
+OTP_BLOCK_COLORS = {
+    # Google standard blue
     "#4285f4", "#1a73e8", "#1558d6", "#1967d2",
     "#185abc", "#174ea6", "#0d47a1", "#1976d2",
+    # Gemini Enterprise navy dark blue
+    "#1c3a70", "#1b3a6b", "#1e3a5f", "#1a3560",
+    "#2c4a8a", "#1d3461", "#1f3d7a", "#173060",
+    # rgb variants
     "rgb(66,133,244)", "rgb(26,115,232)", "rgb(21,90,214)",
+    "rgb(28,58,112)",  # #1c3a70 in rgb
 }
 
-# Kata bahasa Inggris umum yang BUKAN OTP (false positive dari plain text)
-# Daftar ini bisa diperluas sesuai kebutuhan
-ENGLISH_STOPWORDS = {
+# Background warna untuk blok kode (light blue, abu-abu muda, dll)
+OTP_BG_COLORS = {
+    "#eaf2ff", "#e8f0fe", "#f1f8ff", "#e3f2fd",
+    "#f0f4ff", "#dce8fc", "#cfe2ff", "#d2e3fc",
+    "#f5f5f5", "#eeeeee", "#f8f9fa", "#f2f2f2",
+}
+
+# Kata bahasa Inggris PENDEK yang sering muncul sebagai false positive
+# di plain-text fallback. Daftar ini TIDAK dipakai untuk HTML-parsed code.
+ENGLISH_STOPWORDS_PLAINTEXT = {
     "THIS", "THAT", "FROM", "WITH", "HAVE", "WILL", "YOUR", "EMAIL",
     "ALIAS", "SENT", "STOP", "LINK", "CLICK", "HERE", "MORE", "INFO",
     "MAIL", "TEAM", "SIGN", "OPEN", "VIEW", "HELP", "NEXT", "BACK",
-    "CODE", "VERIFY", "GOOGLE", "GMAIL", "RELAY", "FIREFOX", "MOZMAIL",
+    "VERIFY", "GOOGLE", "GMAIL", "RELAY", "FIREFOX", "MOZMAIL",
     "LEARN", "ABOUT", "BELOW", "ABOVE", "ENTER", "INPUT", "SUBMIT",
     "PLEASE", "CHECK", "VALID", "EXPIR", "NEVER", "SHARE", "PASS",
     "THANK", "SINCER", "FORWARD", "IGNORE", "REQUEST", "RECEIVED",
-    "ACCESS", "ENTERPRISE", "BUSINESS", "EDITION", "VERIFY", "GEMINI",
+    "ACCESS", "ENTERPRISE", "BUSINESS", "EDITION", "GEMINI", "CLOUD",
+    "ALIAS", "INBOX", "SPAM", "DRAFT", "SENT", "TRASH", "LABEL",
 }
 
 # Pattern regex — HANYA untuk angka murni atau pola eksplisit
-# Tidak ada lagi alphanumeric broad match
 NUMERIC_OTP_PATTERNS = [
-    # "code is: 123456" / "code: 123456"
     r'(?:verification\s+)?code\s*(?:is\s*)?[:\s]+([0-9]{4,8})\b',
     r'one-time\s+(?:verification\s+)?code[^0-9]{0,20}([0-9]{4,8})\b',
     r'Your\s+(?:verification\s+)?code\s+is[:\s]+([0-9]{4,8})\b',
     r'OTP[:\s]+([0-9]{4,8})\b',
-    # Standalone 6-digit number
     r'\b([0-9]{6})\b',
-    # Standalone 7-8 digit
     r'\b([0-9]{7,8})\b',
-    # Standalone 4-digit number (fallback terakhir)
     r'\b([0-9]{4})\b',
 ]
 
-# Konteks yang menandakan angka adalah bagian dari footer/alamat, bukan OTP
 FOOTER_CONTEXT_KEYWORDS = [
     "copyright", "©", "all rights", "google llc",
     "mountain view", "amphitheatre", "94043",
@@ -81,113 +93,175 @@ FOOTER_CONTEXT_KEYWORDS = [
     "manage", "preferences", "address",
 ]
 
-# Tahun yang sering muncul di footer
 FALSE_POSITIVE_YEARS = {str(y) for y in range(2018, 2032)}
 
 
-def _is_english_word(token: str) -> bool:
-    """Return True jika token adalah kata bahasa Inggris umum (bukan OTP)."""
-    upper = token.upper()
-    # Cek exact match
-    if upper in ENGLISH_STOPWORDS:
+def _normalize_color(raw: str) -> str:
+    """Lowercase dan strip spasi dari string warna CSS."""
+    return raw.lower().replace(" ", "").strip()
+
+
+def _color_matches_otp_set(color_str: str, color_set: set) -> bool:
+    """Cek apakah color_str cocok dengan salah satu warna di color_set."""
+    c = _normalize_color(color_str)
+    if c in color_set:
         return True
-    # Cek apakah semua karakter adalah huruf (bukan alphanumeric campuran)
-    # OTP yang valid biasanya campuran huruf+angka atau angka saja
-    if upper.isalpha() and len(upper) >= 4:
-        return True
+    # Partial match untuk hex pendek / variasi
+    for ref in color_set:
+        if c.startswith(ref[:4]) and len(c) >= 4:
+            return True
     return False
+
+
+def _extract_style_props(style: str) -> dict:
+    """
+    Parse inline CSS style string menjadi dict property → value.
+    Contoh: "font-size:28px;color:#1c3a70" → {"font-size": "28px", "color": "#1c3a70"}
+    """
+    props = {}
+    for decl in style.split(";"):
+        decl = decl.strip()
+        if ":" in decl:
+            k, _, v = decl.partition(":")
+            props[k.strip().lower()] = v.strip().lower()
+    return props
+
+
+def _is_otp_styled_element(tag) -> tuple:
+    """
+    Deteksi apakah elemen HTML ini adalah blok kode OTP berdasarkan style.
+    Return (is_otp_block: bool, reason: str)
+
+    Kriteria:
+      - font-size >= 20px / 15pt
+      - color cocok dengan OTP_BLOCK_COLORS
+      - background-color cocok dengan OTP_BG_COLORS
+      - letter-spacing (biasanya ada di blok kode)
+      - kombinasi font-weight:bold + font-size >= 16px
+    """
+    style_raw = tag.get("style", "") or ""
+    if not style_raw:
+        # Juga cek attribute color dan bgcolor langsung
+        color_attr = _normalize_color(tag.get("color", ""))
+        bgcolor_attr = _normalize_color(tag.get("bgcolor", ""))
+        if color_attr and _color_matches_otp_set(color_attr, OTP_BLOCK_COLORS):
+            return True, f"color attr={color_attr}"
+        if bgcolor_attr and _color_matches_otp_set(bgcolor_attr, OTP_BG_COLORS):
+            return True, f"bgcolor attr={bgcolor_attr}"
+        return False, ""
+
+    props = _extract_style_props(style_raw)
+
+    # Cek font-size
+    fs_raw = props.get("font-size", "")
+    is_large_font = False
+    if fs_raw:
+        m = re.match(r'([\d.]+)(px|pt|em|rem)', fs_raw)
+        if m:
+            val  = float(m.group(1))
+            unit = m.group(2)
+            px   = val if unit == "px" else \
+                   val * 1.333 if unit == "pt" else \
+                   val * 16
+            if px >= 20:
+                is_large_font = True
+        elif fs_raw in ("large", "x-large", "xx-large", "larger"):
+            is_large_font = True
+
+    if is_large_font:
+        return True, f"font-size={fs_raw}"
+
+    # Cek color (text color)
+    color_val = props.get("color", "")
+    if color_val and _color_matches_otp_set(color_val, OTP_BLOCK_COLORS):
+        return True, f"color={color_val}"
+
+    # Cek background-color
+    bg_val = props.get("background-color", "") or props.get("background", "")
+    if bg_val and _color_matches_otp_set(bg_val, OTP_BG_COLORS):
+        return True, f"background-color={bg_val}"
+
+    # Cek letter-spacing (hampir selalu ada di blok kode)
+    ls_raw = props.get("letter-spacing", "")
+    if ls_raw and ls_raw not in ("normal", "0", "0px", "0em"):
+        # Hanya valid jika font-weight bold atau font-size >= 14px
+        fw = props.get("font-weight", "")
+        if fw in ("bold", "700", "800", "900"):
+            return True, f"letter-spacing={ls_raw} + font-weight={fw}"
+
+    return False, ""
 
 
 def _extract_otp_from_html(html: str, log_fn=None) -> Optional[str]:
     """
-    Strategi 1 & 2: Parse HTML langsung dengan BeautifulSoup.
+    Strategi 1 & 2: Parse HTML langsung.
 
-    Cari elemen yang merupakan blok kode OTP berdasarkan:
-      - font-size >= 20px di style attribute / inline CSS
-      - warna teks biru (Google brand color)
-      - elemen yang HANYA berisi teks 4-8 karakter alphanumeric
+    Penting: untuk HTML-parsed candidates, TIDAK dipakai _is_english_word()
+    karena OTP seperti FPXSBS sudah difilter oleh konteks HTML (style).
+    Stopword hanya berlaku di plain-text fallback.
     """
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
         return None
 
-    candidates = []
+    candidates = []  # list of (priority, code)
 
-    # ── Strategi 1: Elemen dengan font besar atau warna biru ──────────────
+    # ── Strategi 1: Elemen dengan OTP style (font besar / warna kode) ─────
     for tag in soup.find_all(True):
-        style = tag.get("style", "") or ""
-        style_lower = style.lower().replace(" ", "")
+        is_otp, reason = _is_otp_styled_element(tag)
+        if not is_otp:
+            continue
 
-        is_large_font = False
-        is_blue = False
+        # Ambil inner text, strip whitespace
+        text = re.sub(r'\s+', '', tag.get_text(separator="", strip=True))
 
-        # Cek font-size
-        fs_match = re.search(r'font-size\s*:\s*(\d+(?:\.\d+)?)(px|pt|em|rem)', style_lower)
-        if fs_match:
-            size_val  = float(fs_match.group(1))
-            size_unit = fs_match.group(2)
-            # Konversi ke px approx
-            if size_unit == "px":
-                size_px = size_val
-            elif size_unit == "pt":
-                size_px = size_val * 1.333
-            elif size_unit in ("em", "rem"):
-                size_px = size_val * 16
-            else:
-                size_px = size_val
-            if size_px >= 20:
-                is_large_font = True
+        # Harus persis 4-8 karakter alphanumeric
+        if not re.fullmatch(r'[A-Z0-9]{4,8}', text, re.IGNORECASE):
+            continue
 
-        # Cek warna biru
-        for blue in GOOGLE_BLUE_COLORS:
-            if blue.replace(" ", "") in style_lower:
-                is_blue = True
-                break
-        # Juga cek color attribute langsung
-        color_attr = (tag.get("color") or "").lower().strip()
-        if color_attr in GOOGLE_BLUE_COLORS or color_attr.startswith("#42") or color_attr.startswith("#1a"):
-            is_blue = True
+        code = text.upper()
+        if log_fn:
+            log_fn(
+                f"   🎯 OTP via HTML style [{reason}]: '{code}'",
+                "WARNING"
+            )
+        candidates.append((1, code))
 
-        if is_large_font or is_blue:
-            text = tag.get_text(separator="", strip=True)
-            # Bersihkan spasi dan newline
-            text = re.sub(r'\s+', '', text)
-            if re.fullmatch(r'[A-Z0-9]{4,8}', text, re.IGNORECASE):
-                code = text.upper()
-                if not _is_english_word(code):
-                    if log_fn:
-                        log_fn(
-                            f"   🎯 OTP via HTML style (font={is_large_font}, blue={is_blue}): '{code}'",
-                            "WARNING"
-                        )
-                    candidates.append((1, code))  # priority 1
-
-    # ── Strategi 2: Elemen yang HANYA berisi 4-8 char alphanumeric ────────
-    # Ini menangkap <td> atau <div> yang isinya cuma kode (tanpa teks lain)
-    STANDALONE_TAGS = ["td", "div", "p", "span", "h1", "h2", "h3", "b", "strong"]
+    # ── Strategi 2: Standalone block 4-8 char alphanumeric ────────────────
+    # Menangkap <td>/<div>/<span> yang isinya HANYA kode, tanpa teks lain
+    STANDALONE_TAGS = ["td", "div", "p", "span", "h1", "h2", "h3",
+                       "b", "strong", "center", "blockquote"]
     for tag in soup.find_all(STANDALONE_TAGS):
-        text = tag.get_text(separator="", strip=True)
-        text_clean = re.sub(r'\s+', '', text)
-        # Harus persis 4-8 karakter alphanumeric, tidak lebih
-        if re.fullmatch(r'[A-Z0-9]{4,8}', text_clean, re.IGNORECASE):
-            code = text_clean.upper()
-            if not _is_english_word(code):
-                # Pastikan tidak ada child tag yang mengandung lebih banyak teks
-                child_text = "".join(
-                    c.get_text(strip=True) for c in tag.children if isinstance(c, Tag)
-                )
-                if not child_text or re.fullmatch(r'[A-Z0-9]{4,8}', re.sub(r'\s+', '', child_text), re.IGNORECASE):
-                    if log_fn:
-                        log_fn(
-                            f"   🎯 OTP via standalone HTML block <{tag.name}>: '{code}'",
-                            "WARNING"
-                        )
-                    candidates.append((2, code))  # priority 2
+        text = re.sub(r'\s+', '', tag.get_text(separator="", strip=True))
+        if not re.fullmatch(r'[A-Z0-9]{4,8}', text, re.IGNORECASE):
+            continue
+        code = text.upper()
+
+        # Pastikan child tag tidak punya teks tambahan
+        child_text = re.sub(
+            r'\s+', '',
+            "".join(c.get_text(strip=True) for c in tag.children if isinstance(c, Tag))
+        )
+        if child_text and not re.fullmatch(r'[A-Z0-9]{4,8}', child_text, re.IGNORECASE):
+            continue
+
+        # Untuk standalone block, SKIP kata-kata HTML umum yang bukan kode
+        # Tapi JANGAN skip pure-alpha karena OTP bisa full-alpha (FPXSBS)
+        # Hanya skip yang ada di stopword list
+        if code in ENGLISH_STOPWORDS_PLAINTEXT:
+            continue
+
+        if log_fn:
+            log_fn(
+                f"   🎯 OTP via standalone <{tag.name}>: '{code}'",
+                "WARNING"
+            )
+        candidates.append((2, code))
 
     if candidates:
-        # Ambil candidate dengan priority terbaik (angka terkecil = lebih tinggi)
         candidates.sort(key=lambda x: x[0])
+        # Dedup: jika ada kode yang sama di priority 1 dan 2, ambil priority 1
         return candidates[0][1]
 
     return None
@@ -196,30 +270,24 @@ def _extract_otp_from_html(html: str, log_fn=None) -> Optional[str]:
 def _extract_otp_from_text(plain_text: str, log_fn=None) -> Optional[str]:
     """
     Strategi 3: Regex di plain text.
-    Hanya angka murni, dan pola eksplisit "code is: XXXX".
-    SKIP kata bahasa Inggris dan angka dalam konteks footer.
+    Hanya angka murni, SKIP kata bahasa Inggris dan angka footer.
     """
-    # Strip header Firefox Relay (teks sebelum body asli Google)
-    # Header Relay biasanya: "This email was sent to your alias ..."
     relay_strip = re.compile(
-        r'^.*?(?:This email was sent to your alias[^.]*\.|'
-        r'You received this email because[^.]*\.|'
-        r'To stop receiving emails sent to this alias[^.]*\.)\\s*',
+        r'^.*?(?:This email was sent to your alias[^.]*\.'
+        r'|You received this email because[^.]*\.'
+        r'|To stop receiving emails sent to this alias[^.]*\.)\s*',
         re.DOTALL | re.IGNORECASE
     )
     stripped = relay_strip.sub("", plain_text).strip()
-    # Kalau strip tidak berhasil (pattern tidak match), pakai full text
     text_to_search = stripped if stripped else plain_text
 
     for pattern in NUMERIC_OTP_PATTERNS:
         for m in re.finditer(pattern, text_to_search, re.IGNORECASE):
             code = m.group(1).upper()
 
-            # Skip tahun
             if re.fullmatch(r'[0-9]{4}', code) and code in FALSE_POSITIVE_YEARS:
                 continue
 
-            # Skip konteks footer
             ctx_start = max(0, m.start() - 40)
             ctx_end   = min(len(text_to_search), m.end() + 20)
             context   = text_to_search[ctx_start:ctx_end].lower()
@@ -292,8 +360,8 @@ class GmailOTPReader:
         Return (html_str, plain_text_str) dari payload email.
         Prioritaskan HTML karena lebih kaya informasi untuk OTP detection.
         """
-        html_parts  = []
-        text_parts  = []
+        html_parts = []
+        text_parts = []
 
         def _walk(part):
             mime = part.get("mimeType", "")
@@ -314,20 +382,12 @@ class GmailOTPReader:
 
         html_str  = "\n".join(html_parts)
         plain_str = "\n".join(text_parts)
-
-        # Jika tidak ada plain text, generate dari HTML
         if not plain_str and html_str:
             plain_str = BeautifulSoup(html_str, "lxml").get_text(separator=" ")
 
         return html_str, plain_str
 
     def _extract_otp_code(self, msg_id: str) -> Optional[str]:
-        """
-        Ekstrak OTP dari email dengan 3 strategi berurutan:
-          1. HTML element dengan font besar / warna biru
-          2. HTML element standalone (hanya berisi kode)
-          3. Regex di plain text (hanya angka, skip kata bahasa Inggris)
-        """
         try:
             msg = self._svc().users().messages().get(
                 userId="me", id=msg_id, format="full"
@@ -353,14 +413,14 @@ class GmailOTPReader:
             self._log(f"   ⚠️  Gagal ambil email: {e}", "WARNING")
             return None
 
-        # ── Strategi 1 & 2: HTML-first ────────────────────────────────────
+        # Strategi 1 & 2: HTML-first
         if html_str:
             otp = _extract_otp_from_html(html_str, log_fn=self._log)
             if otp:
                 self._log(f"   ✅ OTP: '{otp}' (via HTML)", "WARNING")
                 return otp
 
-        # ── Strategi 3: Regex plain text ──────────────────────────────────
+        # Strategi 3: Regex plain text fallback
         if plain_str:
             otp = _extract_otp_from_text(plain_str, log_fn=self._log)
             if otp:
@@ -371,19 +431,13 @@ class GmailOTPReader:
         return None
 
     def _search_messages_latest(self, query: str, max_results: int = 10) -> list:
-        """
-        Cari pesan Gmail, return list ID diurutkan dari TERBARU.
-        """
         try:
             result = self._svc().users().messages().list(
-                userId="me",
-                q=query,
-                maxResults=max_results,
+                userId="me", q=query, maxResults=max_results,
             ).execute()
             msg_list = result.get("messages", [])
             if not msg_list:
                 return []
-
             dated = []
             for m in msg_list:
                 ts = self._get_message_timestamp(m["id"])
@@ -433,49 +487,21 @@ class GmailOTPReader:
         ts_filter = f" after:{max(0, after_timestamp - 60)}" if after_timestamp else ""
 
         queries = []
-
         if mask_email:
-            queries.append((
-                "INBOX mask+subject",
-                f'to:{mask_email} subject:"verification code"{ts_filter}'
-            ))
-            queries.append((
-                "SPAM mask+subject",
-                f'in:spam to:{mask_email} subject:"verification code"{ts_filter}'
-            ))
-            queries.append((
-                "INBOX by mask",
-                f"to:{mask_email}{ts_filter}"
-            ))
-            queries.append((
-                "SPAM by mask",
-                f"in:spam to:{mask_email}{ts_filter}"
-            ))
-
-        queries.append((
-            "INBOX googlecloud-sender",
-            f"from:noreply-googlecloud@google.com{ts_filter}"
-        ))
-        queries.append((
-            "SPAM googlecloud-sender",
-            f"in:spam from:noreply-googlecloud@google.com{ts_filter}"
-        ))
-        queries.append((
-            "INBOX gemini-subject",
-            f'subject:"Gemini Enterprise verification code"{ts_filter}'
-        ))
-        queries.append((
-            "SPAM gemini-subject",
-            f'in:spam subject:"Gemini Enterprise verification code"{ts_filter}'
-        ))
-        queries.append((
-            "INBOX google.com",
-            f"from:google.com{ts_filter}"
-        ))
-        queries.append((
-            "SPAM google.com",
-            f"in:spam from:google.com{ts_filter}"
-        ))
+            queries += [
+                ("INBOX mask+subject", f'to:{mask_email} subject:"verification code"{ts_filter}'),
+                ("SPAM mask+subject",  f'in:spam to:{mask_email} subject:"verification code"{ts_filter}'),
+                ("INBOX by mask",      f"to:{mask_email}{ts_filter}"),
+                ("SPAM by mask",       f"in:spam to:{mask_email}{ts_filter}"),
+            ]
+        queries += [
+            ("INBOX googlecloud-sender", f"from:noreply-googlecloud@google.com{ts_filter}"),
+            ("SPAM googlecloud-sender",  f"in:spam from:noreply-googlecloud@google.com{ts_filter}"),
+            ("INBOX gemini-subject",     f'subject:"Gemini Enterprise verification code"{ts_filter}'),
+            ("SPAM gemini-subject",      f'in:spam subject:"Gemini Enterprise verification code"{ts_filter}'),
+            ("INBOX google.com",         f"from:google.com{ts_filter}"),
+            ("SPAM google.com",          f"in:spam from:google.com{ts_filter}"),
+        ]
 
         self._log(
             f"📬 Polling Gmail | cutoff: {ts_str} | {len(queries)} strategi | INBOX+SPAM",
