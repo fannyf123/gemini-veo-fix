@@ -5,6 +5,8 @@ Baca OTP dari Gmail secara otomatis via Google API.
 Khusus untuk Gemini Enterprise (Google Cloud OTP).
 
 Fix:
+    - OTP regex diperbaiki: prioritas 6-digit, lalu fallback 4-digit
+    - OTP body parsing khusus format Firefox Relay forwarded email
     - Selalu ambil pesan TERBARU (sorted by internalDate desc)
     - Subject filter untuk noreply-googlecloud@google.com
     - Cari di INBOX + SPAM sekaligus
@@ -25,7 +27,7 @@ from googleapiclient.discovery import build
 
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
-# ── Subject OTP dari Gemini Enterprise / Google Cloud ────────────────────────
+# ── Subject OTP dari Gemini Enterprise / Google Cloud ────────────────────
 OTP_SUBJECTS = [
     "Gemini Enterprise verification code",
     "verification code",
@@ -42,6 +44,31 @@ IGNORE_SUBJECTS = [
     "subscription", "announcement",
 ]
 
+# ── OTP patterns: dari paling spesifik ke paling general ──────────────────
+OTP_PATTERNS = [
+    # Format eksplisit "verification code is: XXXXXX"
+    r'verification\s+code[^\d]{0,20}([A-Z0-9]{4,8})\b',
+    r'one-time\s+(?:verification\s+)?code[^\d]{0,20}([A-Z0-9]{4,8})\b',
+    r'Your\s+(?:verification\s+)?code\s+is[:\s]+([A-Z0-9]{4,8})\b',
+    r'OTP[:\s]+([A-Z0-9]{4,8})\b',
+    # Standalone 6-digit number (paling umum untuk Google)
+    r'\b([0-9]{6})\b',
+    # Standalone 7-8 digit
+    r'\b([0-9]{7,8})\b',
+    # Alphanumeric 4-8 karakter dalam conteks kode (e.g. JNY3AM)
+    r'\b([A-Z0-9]{6})\b',
+    # Fallback: 4-digit number
+    r'\b([0-9]{4})\b',
+]
+
+# Pattern untuk strip footer/header relay sebelum cari OTP
+# Ini penting karena Firefox Relay menambah teks di awal body
+RELAY_HEADER_PATTERN = re.compile(
+    r'^.*?(?:This email was sent to your alias.*?\.|'
+    r'You received this email because.*?\.)\s*',
+    re.DOTALL | re.IGNORECASE
+)
+
 
 class GmailOTPReader:
 
@@ -56,7 +83,7 @@ class GmailOTPReader:
         if self._log_cb:
             self._log_cb(msg, level)
 
-    # ── Auth ──────────────────────────────────────────────────────────────────
+    # ── Auth ────────────────────────────────────────────────────────────
     def _authenticate(self):
         creds = None
         if os.path.exists(self.token_path):
@@ -87,7 +114,7 @@ class GmailOTPReader:
             self._authenticate()
         return self._service
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # ── Helpers ────────────────────────────────────────────────────────
     def _get_message_timestamp(self, msg_id: str) -> int:
         try:
             meta = self._svc().users().messages().get(
@@ -111,6 +138,56 @@ class GmailOTPReader:
                 else:
                     body += decoded
         return body
+
+    def _extract_otp_from_body(self, body: str) -> Optional[str]:
+        """
+        Cari kode OTP di body email.
+        Khusus handle format Firefox Relay forwarded email:
+          - Ada header Relay di awal: "This email was sent to your alias..."
+          - Lalu body asli dari Google: "Your one-time verification code is: JNY3AM"
+
+        Strategi:
+          1. Coba cari di FULL body dulu
+          2. Jika tidak ketemu, strip header Relay lalu cari lagi
+          3. Kalau ada angka tahun (e.g. 2025, 2026) dalam konteks
+             copyright/tahun, SKIP itu (false positive umum).
+        """
+        # Nomor yang SANGAT sering jadi false positive
+        # (tahun di footer: "© 2025 Google LLC")
+        FALSE_POSITIVE_YEARS = {str(y) for y in range(2020, 2031)}
+
+        def _search_in(text: str) -> Optional[str]:
+            for pattern in OTP_PATTERNS:
+                for m in re.finditer(pattern, text, re.IGNORECASE):
+                    code = m.group(1).upper()
+                    # Skip tahun seperti 2025, 2026 jika pattern 4-digit
+                    if re.fullmatch(r'[0-9]{4}', code) and code in FALSE_POSITIVE_YEARS:
+                        continue
+                    # Skip jika angka ini muncul dalam konteks tahun/copyright
+                    ctx_start = max(0, m.start() - 30)
+                    ctx_end   = min(len(text), m.end() + 10)
+                    context   = text[ctx_start:ctx_end].lower()
+                    if any(kw in context for kw in
+                           ["copyright", "\u00a9", "all rights", "google llc",
+                            "mountain view", "amphitheatre", "94043",
+                            "1600", "privacy", "terms"]):
+                        continue
+                    return code
+            return None
+
+        # Coba di full body
+        result = _search_in(body)
+        if result:
+            return result
+
+        # Strip header Relay lalu coba lagi
+        stripped = RELAY_HEADER_PATTERN.sub("", body)
+        if stripped != body:
+            result = _search_in(stripped)
+            if result:
+                return result
+
+        return None
 
     def _extract_otp_code(self, msg_id: str) -> Optional[str]:
         """Ambil kode OTP dari body email."""
@@ -139,21 +216,12 @@ class GmailOTPReader:
             self._log(f"   ⚠️  Gagal ambil email: {e}", "WARNING")
             return None
 
-        for pattern in [
-            r'verification\s+code[:\s\n]+([0-9]{4,8})',
-            r'Your\s+(?:verification\s+)?code\s+is[:\s]+([0-9]{4,8})',
-            r'OTP[:\s]+([0-9]{4,8})',
-            r'code[:\s]+([0-9]{4,8})',
-            r'\b([0-9]{6})\b',
-            r'\b([0-9]{4})\b',
-        ]:
-            m = re.search(pattern, body, re.IGNORECASE)
-            if m:
-                code = m.group(1)
-                self._log(f"   ✅ OTP: '{code}'", "WARNING")
-                return code
+        otp = self._extract_otp_from_body(body)
+        if otp:
+            self._log(f"   ✅ OTP: '{otp}'", "WARNING")
+            return otp
 
-        self._log("   ⚠️  Tidak ada angka OTP di body", "WARNING")
+        self._log("   ⚠️  Tidak ada kode OTP valid di body", "WARNING")
         return None
 
     def _search_messages_latest(self, query: str, max_results: int = 10) -> list:
@@ -202,7 +270,7 @@ class GmailOTPReader:
         except Exception as e:
             self._log(f"   ⚠️  Gagal pindah dari spam: {e}", "WARNING")
 
-    # ── Main polling ──────────────────────────────────────────────────────────
+    # ── Main polling ────────────────────────────────────────────────────
     def wait_for_otp(
         self,
         sender:          str                = "noreply-googlecloud@google.com",
@@ -215,20 +283,6 @@ class GmailOTPReader:
         """
         Poll Gmail sampai OTP ditemukan.
         Selalu cek pesan TERBARU duluan (sort by internalDate desc).
-
-        Args:
-            sender          : Sender hint (e.g. 'noreply-googlecloud@google.com')
-            timeout         : Batas waktu (detik)
-            interval        : Jeda polling (detik)
-            log_callback    : Fungsi (msg, level) untuk log ke UI
-            mask_email      : Email mask aktif — filter by To:
-            after_timestamp : Unix ts saat submit email — abaikan email lebih lama
-
-        Returns:
-            String kode OTP.
-
-        Raises:
-            TimeoutError jika OTP tidak ditemukan dalam timeout.
         """
         self._log_cb = log_callback
         self._svc()
@@ -239,10 +293,9 @@ class GmailOTPReader:
         )
         ts_filter = f" after:{max(0, after_timestamp - 60)}" if after_timestamp else ""
 
-        # ── Build queries (ordered by priority) ──────────────────────────────
+        # ── Build queries (ordered by priority) ─────────────────────────────
         queries = []
 
-        # P1: Subject exact + mask email (paling spesifik)
         if mask_email:
             queries.append((
                 "INBOX mask+subject",
@@ -252,7 +305,6 @@ class GmailOTPReader:
                 "SPAM mask+subject",
                 f'in:spam to:{mask_email} subject:"verification code"{ts_filter}'
             ))
-            # Semua email ke mask ini (terbaru)
             queries.append((
                 "INBOX by mask",
                 f"to:{mask_email}{ts_filter}"
@@ -262,7 +314,6 @@ class GmailOTPReader:
                 f"in:spam to:{mask_email}{ts_filter}"
             ))
 
-        # P2: Sender exact googlecloud
         queries.append((
             "INBOX googlecloud-sender",
             f"from:noreply-googlecloud@google.com{ts_filter}"
@@ -271,8 +322,6 @@ class GmailOTPReader:
             "SPAM googlecloud-sender",
             f"in:spam from:noreply-googlecloud@google.com{ts_filter}"
         ))
-
-        # P3: Subject keywords
         queries.append((
             "INBOX gemini-subject",
             f'subject:"Gemini Enterprise verification code"{ts_filter}'
@@ -281,8 +330,6 @@ class GmailOTPReader:
             "SPAM gemini-subject",
             f'in:spam subject:"Gemini Enterprise verification code"{ts_filter}'
         ))
-
-        # P4: Broad google sender
         queries.append((
             "INBOX google.com",
             f"from:google.com{ts_filter}"
@@ -304,14 +351,12 @@ class GmailOTPReader:
 
         while time.time() - start < timeout:
             for label, q in queries:
-                # Selalu ambil pesan terbaru duluan
                 ids = self._search_messages_latest(q, max_results=10)
                 for mid in ids:
                     if mid in seen_ids:
                         continue
                     seen_ids.add(mid)
 
-                    # Filter timestamp: skip email lama
                     if after_timestamp:
                         msg_ts = self._get_message_timestamp(mid)
                         if 0 < msg_ts < (after_timestamp - 60):

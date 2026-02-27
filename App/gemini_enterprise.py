@@ -4,10 +4,11 @@ gemini_enterprise.py
 Otomasi generate video di business.gemini.google
 Menggunakan undetected-chromedriver (UC) + fresh temp profile.
 
-Perbedaan utama vs versi lama:
+Fix:
     - Tiap login pakai email mask BARU dari Firefox Relay
     - Mask lama dihapus otomatis setelah selesai/gagal
     - OTP diambil dari pesan TERBARU (sort internalDate desc)
+    - Setelah OTP submit, deteksi OTP salah/invalid lalu retry
     - Jika relay_config.json tidak ada, fallback ke mask_email dari config
 """
 
@@ -68,8 +69,25 @@ SUBMIT_SELECTORS = [
     "button",
 ]
 
+# Keywords yang menandakan OTP salah/expired di halaman Google
+OTP_ERROR_KEYWORDS = [
+    "wrong code",
+    "incorrect code",
+    "invalid code",
+    "code expired",
+    "code has expired",
+    "didn't match",
+    "try again",
+    "kode salah",
+    "kode tidak valid",
+    "kode sudah kadaluarsa",
+    "that code didn't work",
+    "code doesn't match",
+    "please check",
+]
 
-# ── Chrome version detection ─────────────────────────────────────────────────
+
+# ── Chrome version detection ─────────────────────────────────────────────
 def _get_chrome_version() -> Optional[int]:
     try:
         import winreg
@@ -103,7 +121,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         self,
         base_dir:          str,
         prompt:            str,
-        mask_email:        str,      # fallback jika tidak ada relay_config.json
+        mask_email:        str,
         output_dir:        str,
         config:            dict,
         log_callback:      Optional[Callable] = None,
@@ -113,7 +131,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         super().__init__(daemon=True)
         self.base_dir          = base_dir
         self.prompt            = prompt
-        self.fallback_email    = mask_email   # email dari config (fallback)
+        self.fallback_email    = mask_email
         self.output_dir        = output_dir or os.path.join(base_dir, "OUTPUT_GEMINI")
         self.config            = config
         self.log_cb            = log_callback
@@ -125,10 +143,8 @@ class GeminiEnterpriseProcessor(threading.Thread):
         self.session_file      = os.path.join(base_dir, "session", "gemini_session.json")
         self._driver           = None
         self._temp_profile     = None
-        # Mask yang dibuat untuk sesi ini (untuk dihapus setelah selesai)
         self._current_mask_id  = None
         self._current_mask_email = None
-        # Firefox Relay instance
         relay_key = FirefoxRelay.load_key(base_dir)
         self._relay = FirefoxRelay(relay_key) if relay_key else None
 
@@ -147,13 +163,8 @@ class GeminiEnterpriseProcessor(threading.Thread):
     def cancel(self):
         self._cancelled = True
 
-    # ── Email mask management ─────────────────────────────────────────────────
+    # ── Email mask management ───────────────────────────────────────────────────
     def _create_new_mask(self) -> str:
-        """
-        Buat email mask baru via Firefox Relay.
-        Return alamat mask (mis. abc123@mozmail.com).
-        Fallback ke self.fallback_email jika Relay tidak tersedia.
-        """
         if self._relay:
             try:
                 ts_label = f"gemini-veo-{int(time.time())}"
@@ -168,14 +179,12 @@ class GeminiEnterpriseProcessor(threading.Thread):
             except Exception as e:
                 self._log(f"   ⚠️  Gagal buat mask baru: {e} — pakai fallback", "WARNING")
 
-        # Fallback: gunakan email dari config
         self._current_mask_email = self.fallback_email
         self._current_mask_id    = None
         self._log(f"   📧 Fallback email: {self.fallback_email}", "WARNING")
         return self.fallback_email
 
     def _delete_current_mask(self):
-        """Hapus mask yang dipakai di sesi ini (cleanup)."""
         if self._relay and self._current_mask_id:
             try:
                 ok = self._relay.delete_mask(self._current_mask_id)
@@ -194,7 +203,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._current_mask_id    = None
             self._current_mask_email = None
 
-    # ── Debug ────────────────────────────────────────────────────────────────
+    # ── Debug ────────────────────────────────────────────────────────────
     def _debug_dump(self, driver, label: str):
         try:
             os.makedirs(self.debug_dir, exist_ok=True)
@@ -205,7 +214,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         except Exception:
             pass
 
-    # ── UC Driver ────────────────────────────────────────────────────────────
+    # ── UC Driver ──────────────────────────────────────────────────────────
     def _create_driver(self) -> Optional[object]:
         if uc is None:
             self._log("❌ undetected-chromedriver tidak terinstall!", "ERROR")
@@ -282,7 +291,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         if self._temp_profile and os.path.exists(self._temp_profile):
             shutil.rmtree(self._temp_profile, ignore_errors=True)
 
-    # ── Session ──────────────────────────────────────────────────────────────
+    # ── Session ──────────────────────────────────────────────────────────
     def _has_valid_session(self) -> bool:
         if not os.path.exists(self.session_file):
             return False
@@ -331,7 +340,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         except Exception as e:
             self._log(f"   ⚠️  Gagal simpan session: {e}", "WARNING")
 
-    # ── Selenium helpers ─────────────────────────────────────────────────────
+    # ── Selenium helpers ──────────────────────────────────────────────────
     def _wait_for(self, driver, css_selector, timeout=15):
         try:
             return WebDriverWait(driver, timeout).until(
@@ -369,6 +378,17 @@ class GeminiEnterpriseProcessor(threading.Thread):
         except Exception:
             return False
 
+    def _is_otp_error_page(self, driver) -> bool:
+        """
+        Cek apakah halaman menampilkan error OTP salah/expired.
+        Return True jika ada keyword error OTP di page source.
+        """
+        try:
+            src = driver.page_source.lower()
+            return any(kw in src for kw in OTP_ERROR_KEYWORDS)
+        except Exception:
+            return False
+
     def _click_signin_retry(self, driver) -> bool:
         try:
             for tag in ["a", "button"]:
@@ -383,7 +403,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._log(f"   ⚠️  Click retry: {e}", "WARNING")
         return False
 
-    # ── Main run ──────────────────────────────────────────────────────────────
+    # ── Main run ─────────────────────────────────────────────────────────
     def run(self):
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -411,15 +431,14 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._done(False, str(e))
         finally:
             self._quit_driver(driver)
-            # Hapus mask setelah sesi selesai (sukses maupun gagal)
             self._delete_current_mask()
 
-    # ── Automation ───────────────────────────────────────────────────────────
+    # ── Automation ─────────────────────────────────────────────────────────
     def _run_automation(self, driver, use_session: bool) -> Optional[str]:
         self._progress(5, "Membuka Gemini Enterprise...")
         self._log("🌐 Membuka https://business.gemini.google/ ...")
 
-        # ── Mode session (skip mask + login) ─────────────────────────────────
+        # ── Mode session (skip mask + login) ───────────────────────────────────
         if use_session:
             ok = self._load_session(driver)
             if ok:
@@ -435,17 +454,15 @@ class GeminiEnterpriseProcessor(threading.Thread):
             else:
                 self._log("⚠️  Gagal load session, fallback ke login...", "WARNING")
 
-        # ── Login otomatis dengan mask BARU tiap attempt ──────────────────────
+        # ── Login otomatis dengan mask BARU tiap attempt ──────────────────────────
         for attempt in range(1, MAX_LOGIN_RETRY + 1):
             if self._cancelled:
                 return None
 
-            # Buat mask baru di tiap attempt (agar tidak terdetect pola berulang)
             active_email = self._create_new_mask()
             self._log(f"🔄 Login attempt {attempt}/{MAX_LOGIN_RETRY} — email: {active_email}")
             self._progress(8, f"Login attempt {attempt}/{MAX_LOGIN_RETRY}...")
 
-            # Warm-up
             if attempt == 1:
                 driver.get("https://www.google.com")
                 time.sleep(random.uniform(2, 3.5))
@@ -459,7 +476,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
             if self._is_error_page(driver):
                 self._log(f"⚠️  Error page sebelum input (attempt {attempt})", "WARNING")
                 if attempt < MAX_LOGIN_RETRY and self._click_signin_retry(driver):
-                    # Hapus mask yang baru dibuat, akan dibuat lagi di attempt berikutnya
                     self._delete_current_mask()
                     time.sleep(random.uniform(2, 3))
                     continue
@@ -531,7 +547,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
             if self._cancelled:
                 return None
 
-            # ── OTP polling (ambil pesan TERBARU) ──────────────────────────
+            # ── OTP polling ───────────────────────────────────────────────
             self._progress(20, "Menunggu OTP...")
             self._log(f"   URL: {driver.current_url}")
             self._debug_dump(driver, "otp_page")
@@ -548,8 +564,8 @@ class GeminiEnterpriseProcessor(threading.Thread):
                         timeout         = OTP_TIMEOUT,
                         interval        = 5,
                         log_callback    = self.log_cb,
-                        mask_email      = active_email,   # filter by mask terbaru
-                        after_timestamp = reg_ts,         # hanya email terbaru
+                        mask_email      = active_email,
+                        after_timestamp = reg_ts,
                     )
                     self._log(f"✅ OTP: {otp_code}", "SUCCESS")
                     break
@@ -579,59 +595,97 @@ class GeminiEnterpriseProcessor(threading.Thread):
             if self._cancelled:
                 return None
 
-            # ── Input OTP ─────────────────────────────────────────────────
-            self._progress(35, "Memasukkan OTP...")
-            try:
-                otp_inputs = driver.find_elements(By.CSS_SELECTOR,
-                    "input[type='text'][maxlength='1'],"
-                    "input[autocomplete='one-time-code'],"
-                    "input[name*='otp'],input[name*='code']"
-                )
-                if len(otp_inputs) > 1:
-                    for i, digit in enumerate(otp_code[:len(otp_inputs)]):
-                        otp_inputs[i].clear()
-                        otp_inputs[i].send_keys(digit)
-                        time.sleep(random.uniform(0.1, 0.22))
-                elif len(otp_inputs) == 1:
-                    self._human_type(driver, otp_inputs[0], otp_code)
-                else:
-                    from selenium.webdriver.common.action_chains import ActionChains
-                    ActionChains(driver).send_keys(otp_code).perform()
-
-                time.sleep(random.uniform(0.7, 1.2))
-
-                for el in driver.find_elements(By.CSS_SELECTOR, "button[type='submit'],button"):
-                    if any(w in el.text.lower() for w in ["verify","continue","sign in","next"]):
-                        self._human_click(driver, el)
-                        break
-                else:
-                    from selenium.webdriver.common.keys import Keys
-                    driver.find_element(By.TAG_NAME, "body").send_keys(Keys.RETURN)
-
-                self._log("✅ OTP tersubmit...")
-                for _ in range(30):
-                    time.sleep(1)
-                    if "business.gemini.google" in driver.current_url:
-                        break
-
-                if "business.gemini.google" not in driver.current_url:
-                    self._log("❌ Redirect timeout!", "ERROR")
-                    self._debug_dump(driver, "otp_redirect_failed")
-                    return None
-
-                self._log("✅ Login berhasil!", "SUCCESS")
-                self._save_session(driver)
+            # ── Input OTP + verifikasi ─────────────────────────────────────────
+            otp_success = self._submit_and_verify_otp(driver, otp_code, active_email)
+            if otp_success:
                 return self._run_veo(driver)
-
-            except Exception as e:
-                self._log(f"❌ Error OTP: {e}", "ERROR")
-                self._debug_dump(driver, "otp_error")
-                return None
+            else:
+                self._log("❌ OTP gagal! Hapus mask + coba ulang dari awal.", "ERROR")
+                self._debug_dump(driver, f"otp_failed_attempt{attempt}")
+                self._delete_current_mask()
+                # Lanjut ke attempt berikutnya (buat mask baru)
+                continue
 
         self._log("❌ Semua login attempt gagal.", "ERROR")
         return None
 
-    # ── Veo ────────────────────────────────────────────────────────────────
+    # ── Submit OTP + verifikasi hasilnya ──────────────────────────────────
+    def _submit_and_verify_otp(self, driver, otp_code: str, active_email: str) -> bool:
+        """
+        Submit kode OTP ke form Google, lalu verifikasi hasilnya:
+          - True  : redirect ke business.gemini.google (login sukses)
+          - False : OTP error page / redirect timeout / exception
+        """
+        self._progress(35, "Memasukkan OTP...")
+        try:
+            otp_inputs = driver.find_elements(By.CSS_SELECTOR,
+                "input[type='text'][maxlength='1'],"
+                "input[autocomplete='one-time-code'],"
+                "input[name*='otp'],input[name*='code']"
+            )
+            if len(otp_inputs) > 1:
+                for i, digit in enumerate(otp_code[:len(otp_inputs)]):
+                    otp_inputs[i].clear()
+                    otp_inputs[i].send_keys(digit)
+                    time.sleep(random.uniform(0.1, 0.22))
+            elif len(otp_inputs) == 1:
+                self._human_type(driver, otp_inputs[0], otp_code)
+            else:
+                from selenium.webdriver.common.action_chains import ActionChains
+                ActionChains(driver).send_keys(otp_code).perform()
+
+            time.sleep(random.uniform(0.7, 1.2))
+
+            # Klik tombol submit OTP
+            submit_found = False
+            for el in driver.find_elements(By.CSS_SELECTOR, "button[type='submit'],button"):
+                if any(w in el.text.lower() for w in ["verify", "continue", "sign in", "next"]):
+                    self._human_click(driver, el)
+                    submit_found = True
+                    break
+            if not submit_found:
+                from selenium.webdriver.common.keys import Keys
+                driver.find_element(By.TAG_NAME, "body").send_keys(Keys.RETURN)
+
+            self._log("✅ OTP tersubmit...")
+
+            # ── Tunggu redirect atau deteksi error OTP ──────────────────────
+            for wait_tick in range(30):
+                time.sleep(1)
+                current_url = driver.current_url
+
+                # Berhasil login
+                if "business.gemini.google" in current_url:
+                    self._log("✅ Login berhasil! Redirect ke dashboard.", "SUCCESS")
+                    self._save_session(driver)
+                    return True
+
+                # Deteksi halaman error OTP (kode salah / expired)
+                if self._is_otp_error_page(driver):
+                    self._log(
+                        f"   ❌ OTP '{otp_code}' SALAH atau EXPIRED — "
+                        f"halaman Google menolak kode ini.",
+                        "ERROR"
+                    )
+                    self._debug_dump(driver, "otp_rejected")
+                    return False
+
+                # Masih di halaman OTP / loading, lanjut polling
+                if wait_tick % 5 == 0 and wait_tick > 0:
+                    self._log(f"   ⏳ Menunggu redirect... ({wait_tick}s)")
+
+            # Timeout 30 detik tanpa redirect
+            self._log(
+                f"   ❌ Redirect timeout setelah OTP submit! URL: {driver.current_url}",
+                "ERROR"
+            )
+            return False
+
+        except Exception as e:
+            self._log(f"❌ Error input OTP: {e}", "ERROR")
+            return False
+
+    # ── Veo ────────────────────────────────────────────────────────────
     def _run_veo(self, driver) -> Optional[str]:
         self._progress(50, "Membuka menu Veo...")
         self._log("🎬 Mencari tombol tools...")
@@ -690,7 +744,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
         if self._cancelled:
             return None
 
-        # Prompt
         self._progress(60, "Input prompt...")
         try:
             prompt_el = None
@@ -724,7 +777,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
         if self._cancelled:
             return None
 
-        # Polling
         self._progress(70, "Menunggu Veo generate...")
         start = time.time()
         video_ready = False
@@ -752,7 +804,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._debug_dump(driver, "polling_timeout")
             return None
 
-        # Download
         self._progress(90, "Mendownload video...")
         try:
             dl_btn = None
