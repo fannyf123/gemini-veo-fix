@@ -1,8 +1,14 @@
-playwright>=1.42.0
+# Browser automation
+undetected-chromedriver>=3.5.5
+selenium>=4.18.0
+
+# Gmail OTP
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
 requests>=2.31.0
 google-auth>=2.28.0
 google-auth-oauthlib>=1.2.0
 google-api-python-client>=2.120.0
-playwright-stealth>=1.0.0
+
+# GUI
+# (tkinter sudah built-in Python)

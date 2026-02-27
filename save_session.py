@@ -1,119 +1,116 @@
 """
-save_session.py  —  Login manual ke Gemini Enterprise, simpan session
+save_session.py  —  Login manual ke Gemini Enterprise, simpan session (format Selenium/UC)
 
 Cara pakai:
     python save_session.py  (atau klik Save_Session.bat)
 
-1. Browser Chrome akan terbuka
+1. Browser Chrome (undetected) akan terbuka
 2. Login MANUAL (ketik email + OTP sendiri)
 3. Setelah halaman business.gemini.google terbuka, tekan Enter di terminal
-4. Session tersimpan di: session/gemini_session.json
+4. Session (cookies) tersimpan di: session/gemini_session.json
 """
 
 import os
 import sys
 import json
+import time
+import tempfile
+import shutil
 
 SESSION_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session")
 SESSION_FILE = os.path.join(SESSION_DIR, "gemini_session.json")
+GEMINI_HOME  = "https://business.gemini.google/"
 
-GEMINI_HOME_URL = "https://business.gemini.google/"
-
-CHROME_PATHS = [
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    os.path.expanduser(r"~\AppData\Local\Google\Chrome\Application\chrome.exe"),
-]
-
-def find_chrome():
-    for p in CHROME_PATHS:
-        if os.path.exists(p):
-            return p
-    return None
 
 def main():
     try:
-        from playwright.sync_api import sync_playwright
+        import undetected_chromedriver as uc
     except ImportError:
-        print("[ERR] playwright tidak terinstall!")
+        print("[ERR] undetected-chromedriver tidak terinstall!")
+        print("      Jalankan: pip install undetected-chromedriver selenium")
         sys.exit(1)
 
     os.makedirs(SESSION_DIR, exist_ok=True)
-    chrome_path = find_chrome()
 
     print()
     print("=" * 55)
-    print("  Gemini Session Saver")
+    print("  Gemini Session Saver (undetected-chromedriver)")
     print("=" * 55)
     print()
-    print("[INFO] Browser akan terbuka.")
-    print("[INFO] Buka: https://business.gemini.google/")
-    print("[INFO] Login MANUAL seperti biasa.")
-    print("[INFO] Setelah berhasil masuk, kembali ke sini dan tekan ENTER.")
+    print("[INFO] Browser Chrome akan terbuka dengan fresh profile.")
+    print("[INFO] Login MANUAL seperti biasa di browser.")
+    print("[INFO] Setelah masuk ke business.gemini.google,")
+    print("       kembali ke sini dan tekan ENTER.")
     print()
 
-    with sync_playwright() as pw:
-        launch_kwargs = dict(
-            headless=False,
-            args=[
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-            ignore_default_args=["--enable-automation"],
+    # Fresh temp profile
+    temp_profile = tempfile.mkdtemp(prefix="gemini_save_session_")
+    print(f"[INFO] Temp profile: {temp_profile}")
+    print()
+
+    options = uc.ChromeOptions()
+    options.add_argument(f"--user-data-dir={temp_profile}")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-infobars")
+    options.add_argument("--lang=en-US")
+    options.add_argument("--window-size=1280,900")
+
+    driver = None
+    try:
+        driver = uc.Chrome(options=options, use_subprocess=True)
+        driver.execute_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
 
-        if chrome_path:
-            print(f"[INFO] Pakai Chrome: {chrome_path}")
-            browser = pw.chromium.launch(executable_path=chrome_path, **launch_kwargs)
-        else:
-            try:
-                browser = pw.chromium.launch(channel="chrome", **launch_kwargs)
-            except Exception:
-                browser = pw.chromium.launch(**launch_kwargs)
-                print("[WRN] Pakai Chromium (Chrome tidak ditemukan)")
+        print("[INFO] Membuka https://business.gemini.google/ ...")
+        driver.get(GEMINI_HOME)
+        time.sleep(3)
 
-        ctx = browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.6261.112 Safari/537.36"
-            ),
-            locale="en-US",
-            timezone_id="Asia/Jakarta",
-        )
-
-        page = ctx.new_page()
-        # Buka URL yang benar: biarkan redirect otomatis ke login
-        page.goto(GEMINI_HOME_URL, wait_until="domcontentloaded", timeout=30_000)
-
-        print("[INFO] Browser terbuka. Login manual...")
+        print("[INFO] Browser terbuka. Silakan login manual.")
         print()
         input(">>> Setelah berhasil masuk ke business.gemini.google, tekan ENTER: ")
         print()
 
-        current_url = page.url
-        print(f"[INFO] URL: {current_url}")
+        current = driver.current_url
+        print(f"[INFO] URL saat ini: {current}")
 
-        if "business.gemini.google" not in current_url:
-            print("[WRN] Belum di halaman Gemini.")
+        if "business.gemini.google" not in current:
+            print("[WRN] Sepertinya belum di halaman Gemini.")
             confirm = input(">>> Lanjut simpan session? (y/n): ").strip().lower()
             if confirm != "y":
-                browser.close()
+                print("[INFO] Dibatalkan.")
                 return
 
-        storage = ctx.storage_state()
+        # Ambil semua cookies dari driver
+        cookies = driver.get_cookies()
         with open(SESSION_FILE, "w", encoding="utf-8") as f:
-            json.dump(storage, f, indent=2)
+            json.dump(cookies, f, indent=2)
 
-        n = len(storage.get("cookies", []))
-        print(f"[OK]  Session tersimpan: {SESSION_FILE}")
-        print(f"[OK]  Cookies          : {n}")
+        google_ck = [c for c in cookies if ".google.com" in c.get("domain", "")]
+        print(f"[OK]  Session tersimpan : {SESSION_FILE}")
+        print(f"[OK]  Total cookies     : {len(cookies)}")
+        print(f"[OK]  Google cookies    : {len(google_ck)}")
         print()
         print("[DONE] Jalankan Launcher.bat untuk generate video.")
-        browser.close()
+
+    except Exception as e:
+        print(f"[ERR] {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        try:
+            if driver:
+                driver.quit()
+        except Exception:
+            pass
+        # Bersihkan temp profile
+        try:
+            shutil.rmtree(temp_profile, ignore_errors=True)
+        except Exception:
+            pass
+
 
 if __name__ == "__main__":
     main()
