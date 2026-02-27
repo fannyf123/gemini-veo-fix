@@ -1,11 +1,13 @@
 """
 gmail_otp.py  —  GmailOTPReader
+
 Baca OTP dari Gmail secara otomatis via Google API.
+Khusus untuk Gemini Enterprise (Google Cloud OTP).
 
 Fix:
-    - Tambah subject: 'Gemini Enterprise verification code'
-    - Tambah sender: noreply-googlecloud@google.com
-    - Cari OTP di INBOX + SPAM sekaligus
+    - Selalu ambil pesan TERBARU (sorted by internalDate desc)
+    - Subject filter untuk noreply-googlecloud@google.com
+    - Cari di INBOX + SPAM sekaligus
     - Auto pindah ke Inbox jika ketemu di Spam
 """
 import base64
@@ -23,9 +25,9 @@ from googleapiclient.discovery import build
 
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
-# ── Subject yang diketahui dari Gemini Enterprise ────────────────────────────
+# ── Subject OTP dari Gemini Enterprise / Google Cloud ────────────────────────
 OTP_SUBJECTS = [
-    "Gemini Enterprise verification code",   # ← EXACT subject yang diterima
+    "Gemini Enterprise verification code",
     "verification code",
     "Your verification code",
     "Your code",
@@ -35,16 +37,9 @@ OTP_SUBJECTS = [
     "sign in",
 ]
 
-# ── Sender yang diketahui dari Gemini Enterprise ──────────────────────────
-KNOWN_SENDERS = [
-    "noreply-googlecloud@google.com",         # ← sender EXACT dari Gemini Enterprise
-    "noreply@google.com",
-    "no-reply@accounts.google.com",
-    "googlecloud",                            # partial match untuk query Gmail
-]
-
 IGNORE_SUBJECTS = [
-    "welcome", "newsletter", "get started", "subscription",
+    "welcome", "newsletter", "get started",
+    "subscription", "announcement",
 ]
 
 
@@ -61,6 +56,7 @@ class GmailOTPReader:
         if self._log_cb:
             self._log_cb(msg, level)
 
+    # ── Auth ──────────────────────────────────────────────────────────────────
     def _authenticate(self):
         creds = None
         if os.path.exists(self.token_path):
@@ -70,9 +66,11 @@ class GmailOTPReader:
             if creds and creds.expired and creds.refresh_token:
                 try:
                     creds.refresh(Request())
+                    self._log("🔄 Gmail token di-refresh")
                 except Exception:
                     creds = None
             if not creds:
+                self._log("🔐 Memulai OAuth Gmail...")
                 if not os.path.exists(self.creds_path):
                     raise FileNotFoundError(
                         f"credentials.json tidak ditemukan di: {self.creds_path}"
@@ -89,6 +87,7 @@ class GmailOTPReader:
             self._authenticate()
         return self._service
 
+    # ── Helpers ───────────────────────────────────────────────────────────────
     def _get_message_timestamp(self, msg_id: str) -> int:
         try:
             meta = self._svc().users().messages().get(
@@ -114,16 +113,18 @@ class GmailOTPReader:
         return body
 
     def _extract_otp_code(self, msg_id: str) -> Optional[str]:
-        """Ambil OTP dari body email."""
+        """Ambil kode OTP dari body email."""
         try:
-            msg  = self._svc().users().messages().get(userId="me", id=msg_id, format="full").execute()
-
-            # Log subject untuk debug
-            headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
+            msg = self._svc().users().messages().get(
+                userId="me", id=msg_id, format="full"
+            ).execute()
+            headers = {
+                h["name"].lower(): h["value"]
+                for h in msg.get("payload", {}).get("headers", [])
+            }
             self._log(f"   📧 From   : {headers.get('from', '-')}", "WARNING")
             self._log(f"   📧 Subject: {headers.get('subject', '-')}", "WARNING")
 
-            # Skip email yang harus diabaikan
             subj_lower = headers.get("subject", "").lower()
             for ign in IGNORE_SUBJECTS:
                 if ign in subj_lower:
@@ -131,65 +132,77 @@ class GmailOTPReader:
                     return None
 
             body = self._decode_body(msg["payload"])
+            snippet = body[:300].replace("\n", " ").strip()
+            self._log(f"   📌 Body: {snippet}", "WARNING")
 
         except Exception as e:
             self._log(f"   ⚠️  Gagal ambil email: {e}", "WARNING")
             return None
 
-        # Log cuplikan body untuk debug
-        snippet = body[:300].replace("\n", " ").strip()
-        self._log(f"   📌 Body: {snippet}", "WARNING")
-
-        # ── Pattern OTP ─────────────────────────────────────────────────────
         for pattern in [
             r'verification\s+code[:\s\n]+([0-9]{4,8})',
             r'Your\s+(?:verification\s+)?code\s+is[:\s]+([0-9]{4,8})',
             r'OTP[:\s]+([0-9]{4,8})',
             r'code[:\s]+([0-9]{4,8})',
-            r'\b([0-9]{6})\b',      # 6 digit (paling umum)
-            r'\b([0-9]{4})\b',      # 4 digit fallback
+            r'\b([0-9]{6})\b',
+            r'\b([0-9]{4})\b',
         ]:
             m = re.search(pattern, body, re.IGNORECASE)
             if m:
                 code = m.group(1)
-                self._log(f"   ✅ OTP pattern match: '{code}'", "WARNING")
+                self._log(f"   ✅ OTP: '{code}'", "WARNING")
                 return code
 
-        self._log("   ⚠️  Tidak ada angka OTP di body email", "WARNING")
+        self._log("   ⚠️  Tidak ada angka OTP di body", "WARNING")
         return None
 
-    def _search_messages(self, query: str, max_results: int = 10) -> list:
+    def _search_messages_latest(self, query: str, max_results: int = 10) -> list:
+        """
+        Cari pesan Gmail, return list ID diurutkan dari TERBARU.
+        Gmail API secara default sudah mengembalikan newest first,
+        tapi kita pastikan dengan sort by internalDate desc.
+        """
         try:
             result = self._svc().users().messages().list(
-                userId="me", q=query, maxResults=max_results
+                userId="me",
+                q=query,
+                maxResults=max_results,
             ).execute()
-            return [m["id"] for m in result.get("messages", [])]
-        except Exception:
+            msg_list = result.get("messages", [])
+            if not msg_list:
+                return []
+
+            # Ambil internalDate untuk setiap pesan, sort terbaru duluan
+            dated = []
+            for m in msg_list:
+                ts = self._get_message_timestamp(m["id"])
+                dated.append((ts, m["id"]))
+            dated.sort(key=lambda x: x[0], reverse=True)  # newest first
+            return [mid for _, mid in dated]
+        except Exception as e:
+            self._log(f"   ⚠️  Search gagal [{query[:60]}]: {e}")
             return []
 
     def mark_as_read(self, msg_id: str):
         try:
             self._svc().users().messages().modify(
-                userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
+                userId="me", id=msg_id,
+                body={"removeLabelIds": ["UNREAD"]}
             ).execute()
         except Exception:
             pass
 
     def move_from_spam(self, msg_id: str):
-        """Pindahkan email dari SPAM ke INBOX."""
         try:
             self._svc().users().messages().modify(
-                userId="me",
-                id=msg_id,
-                body={
-                    "removeLabelIds": ["SPAM"],
-                    "addLabelIds":    ["INBOX"],
-                }
+                userId="me", id=msg_id,
+                body={"removeLabelIds": ["SPAM"], "addLabelIds": ["INBOX"]}
             ).execute()
-            self._log("📥 Email dipindahkan dari SPAM → INBOX", "WARNING")
+            self._log("📥 Email dipindahkan SPAM → INBOX", "WARNING")
         except Exception as e:
-            self._log(f"⚠️  Gagal pindah dari spam: {e}", "WARNING")
+            self._log(f"   ⚠️  Gagal pindah dari spam: {e}", "WARNING")
 
+    # ── Main polling ──────────────────────────────────────────────────────────
     def wait_for_otp(
         self,
         sender:          str                = "noreply-googlecloud@google.com",
@@ -199,76 +212,121 @@ class GmailOTPReader:
         mask_email:      str                = None,
         after_timestamp: int                = 0,
     ) -> str:
+        """
+        Poll Gmail sampai OTP ditemukan.
+        Selalu cek pesan TERBARU duluan (sort by internalDate desc).
+
+        Args:
+            sender          : Sender hint (e.g. 'noreply-googlecloud@google.com')
+            timeout         : Batas waktu (detik)
+            interval        : Jeda polling (detik)
+            log_callback    : Fungsi (msg, level) untuk log ke UI
+            mask_email      : Email mask aktif — filter by To:
+            after_timestamp : Unix ts saat submit email — abaikan email lebih lama
+
+        Returns:
+            String kode OTP.
+
+        Raises:
+            TimeoutError jika OTP tidak ditemukan dalam timeout.
+        """
         self._log_cb = log_callback
         self._svc()
 
-        ts_str    = datetime.datetime.fromtimestamp(after_timestamp).strftime("%H:%M:%S") if after_timestamp else "N/A"
+        ts_str    = (
+            datetime.datetime.fromtimestamp(after_timestamp).strftime("%H:%M:%S")
+            if after_timestamp else "N/A"
+        )
         ts_filter = f" after:{max(0, after_timestamp - 60)}" if after_timestamp else ""
 
-        # ── Build queries: prioritas dari yang paling spesifik ────────────────────
+        # ── Build queries (ordered by priority) ──────────────────────────────
         queries = []
 
-        # ── PRIORITAS 1: Subject EXACT "Gemini Enterprise verification code" ───
-        queries.append(("INBOX exact-subject",
-                        f'subject:"Gemini Enterprise verification code"{ts_filter}'))
-        queries.append(("SPAM exact-subject",
-                        f'in:spam subject:"Gemini Enterprise verification code"{ts_filter}'))
-
-        # ── PRIORITAS 2: Sender exact noreply-googlecloud ────────────────────
-        queries.append(("INBOX googlecloud-sender",
-                        f"from:noreply-googlecloud@google.com{ts_filter}"))
-        queries.append(("SPAM googlecloud-sender",
-                        f"in:spam from:noreply-googlecloud@google.com{ts_filter}"))
-
-        # ── PRIORITAS 3: by mask email (semua folder) ──────────────────────
+        # P1: Subject exact + mask email (paling spesifik)
         if mask_email:
-            queries.append(("INBOX+SPAM by mask",
-                            f"to:{mask_email}{ts_filter}"))
-            queries.append(("SPAM by mask",
-                            f"in:spam to:{mask_email}{ts_filter}"))
+            queries.append((
+                "INBOX mask+subject",
+                f'to:{mask_email} subject:"verification code"{ts_filter}'
+            ))
+            queries.append((
+                "SPAM mask+subject",
+                f'in:spam to:{mask_email} subject:"verification code"{ts_filter}'
+            ))
+            # Semua email ke mask ini (terbaru)
+            queries.append((
+                "INBOX by mask",
+                f"to:{mask_email}{ts_filter}"
+            ))
+            queries.append((
+                "SPAM by mask",
+                f"in:spam to:{mask_email}{ts_filter}"
+            ))
 
-        # ── PRIORITAS 4: Subject keywords lain ────────────────────────────
-        for subj in OTP_SUBJECTS[1:]:  # skip index 0 (sudah di atas)
-            queries.append((f"subj:{subj[:20]}",
-                            f'subject:"{subj}"{ts_filter}'))
-            queries.append((f"spam-subj:{subj[:20]}",
-                            f'in:spam subject:"{subj}"{ts_filter}'))
+        # P2: Sender exact googlecloud
+        queries.append((
+            "INBOX googlecloud-sender",
+            f"from:noreply-googlecloud@google.com{ts_filter}"
+        ))
+        queries.append((
+            "SPAM googlecloud-sender",
+            f"in:spam from:noreply-googlecloud@google.com{ts_filter}"
+        ))
 
-        # ── FALLBACK: broad search di spam ────────────────────────────────
-        queries.append(("fallback:spam-googlecloud",
-                        f"in:spam from:googlecloud{ts_filter}"))
-        queries.append(("fallback:spam-google",
-                        f"in:spam from:google.com{ts_filter}"))
-        if mask_email:
-            queries.append(("fallback:mask-no-ts", f"to:{mask_email}"))
+        # P3: Subject keywords
+        queries.append((
+            "INBOX gemini-subject",
+            f'subject:"Gemini Enterprise verification code"{ts_filter}'
+        ))
+        queries.append((
+            "SPAM gemini-subject",
+            f'in:spam subject:"Gemini Enterprise verification code"{ts_filter}'
+        ))
+
+        # P4: Broad google sender
+        queries.append((
+            "INBOX google.com",
+            f"from:google.com{ts_filter}"
+        ))
+        queries.append((
+            "SPAM google.com",
+            f"in:spam from:google.com{ts_filter}"
+        ))
 
         self._log(
             f"📬 Polling Gmail | cutoff: {ts_str} | {len(queries)} strategi | INBOX+SPAM",
             "WARNING"
         )
+        for i, (lbl, _) in enumerate(queries, 1):
+            self._log(f"   [{i}] {lbl}")
 
         start    = time.time()
         seen_ids = set()
 
         while time.time() - start < timeout:
             for label, q in queries:
-                ids = self._search_messages(q)
+                # Selalu ambil pesan terbaru duluan
+                ids = self._search_messages_latest(q, max_results=10)
                 for mid in ids:
                     if mid in seen_ids:
                         continue
                     seen_ids.add(mid)
 
-                    # Filter timestamp
+                    # Filter timestamp: skip email lama
                     if after_timestamp:
                         msg_ts = self._get_message_timestamp(mid)
                         if 0 < msg_ts < (after_timestamp - 60):
+                            self._log(
+                                f"   ⏩ Email lama "
+                                f"({datetime.datetime.fromtimestamp(msg_ts).strftime('%H:%M:%S')}"
+                                f" < cutoff {ts_str}) — skip"
+                            )
                             continue
 
                     self._log(f"   🔎 [{label}] id={mid[:8]}...")
                     otp = self._extract_otp_code(mid)
                     if otp:
                         self.mark_as_read(mid)
-                        if "spam" in label.lower() or "spam" in q.lower():
+                        if "spam" in label.lower():
                             self.move_from_spam(mid)
                         self._log(f"✅ OTP ditemukan: {otp}", "SUCCESS")
                         return otp
@@ -278,5 +336,6 @@ class GmailOTPReader:
             time.sleep(interval)
 
         raise TimeoutError(
-            f"❌ OTP timeout {timeout}s — email tidak ditemukan di Inbox maupun Spam."
+            f"❌ OTP timeout {timeout}s — email tidak ditemukan di Inbox maupun Spam.\n"
+            f"Pastikan Firefox Relay meneruskan email ke Gmail Anda."
         )

@@ -2,8 +2,13 @@
 gemini_enterprise.py
 
 Otomasi generate video di business.gemini.google
-Menggunakan undetected-chromedriver (UC) + fresh temp profile
-agar tidak terdeteksi sebagai bot oleh Google.
+Menggunakan undetected-chromedriver (UC) + fresh temp profile.
+
+Perbedaan utama vs versi lama:
+    - Tiap login pakai email mask BARU dari Firefox Relay
+    - Mask lama dihapus otomatis setelah selesai/gagal
+    - OTP diambil dari pesan TERBARU (sort internalDate desc)
+    - Jika relay_config.json tidak ada, fallback ke mask_email dari config
 """
 
 import os
@@ -27,11 +32,12 @@ try:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
-    from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
+    from selenium.common.exceptions import TimeoutException, WebDriverException
 except ImportError:
     pass
 
 from App.gmail_otp import GmailOTPReader
+from App.firefox_relay import FirefoxRelay
 
 GEMINI_HOME_URL   = "https://business.gemini.google/"
 
@@ -45,7 +51,6 @@ CHROME_PATHS = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
     os.path.expanduser(r"~\AppData\Local\Google\Chrome\Application\chrome.exe"),
-    r"C:\Program Files\Google\Chrome Beta\Application\chrome.exe",
 ]
 
 EMAIL_SELECTORS = [
@@ -64,59 +69,31 @@ SUBMIT_SELECTORS = [
 ]
 
 
-# ── Deteksi versi Chrome ─────────────────────────────────────────────────────
+# ── Chrome version detection ─────────────────────────────────────────────────
 def _get_chrome_version() -> Optional[int]:
-    """
-    Deteksi versi major Chrome yang terinstall.
-    Return integer major version (mis. 145) atau None jika gagal.
-    """
-    # 1. Cek dari registry Windows
     try:
         import winreg
-        for key_path in [
-            r"SOFTWARE\Google\Chrome\BLBeacon",
-            r"SOFTWARE\Wow6432Node\Google\Chrome\BLBeacon",
-        ]:
-            try:
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path)
-                version, _ = winreg.QueryValueEx(key, "version")
-                major = int(version.split(".")[0])
-                return major
-            except Exception:
-                pass
-            try:
-                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path)
-                version, _ = winreg.QueryValueEx(key, "version")
-                major = int(version.split(".")[0])
-                return major
-            except Exception:
-                pass
+        for kp in [r"SOFTWARE\Google\Chrome\BLBeacon",
+                   r"SOFTWARE\Wow6432Node\Google\Chrome\BLBeacon"]:
+            for hive in [winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE]:
+                try:
+                    k = winreg.OpenKey(hive, kp)
+                    v, _ = winreg.QueryValueEx(k, "version")
+                    return int(v.split(".")[0])
+                except Exception:
+                    pass
     except ImportError:
         pass
-
-    # 2. Cek dari file chrome.exe --version
     for path in CHROME_PATHS:
         if os.path.exists(path):
             try:
-                result = subprocess.run(
-                    [path, "--version"],
-                    capture_output=True, text=True, timeout=5
-                )
-                m = re.search(r"(\d+)\.\d+\.\d+\.\d+", result.stdout)
+                r = subprocess.run([path, "--version"],
+                    capture_output=True, text=True, timeout=5)
+                m = re.search(r"(\d+)\.\d+\.\d+\.\d+", r.stdout)
                 if m:
                     return int(m.group(1))
             except Exception:
                 pass
-
-    # 3. Cek dari folder Application\chrome.exe di path
-    for path in CHROME_PATHS:
-        parent = os.path.dirname(path)
-        if os.path.exists(parent):
-            for item in os.listdir(parent):
-                m = re.match(r"^(\d+)\.\d+\.\d+\.\d+$", item)
-                if m:
-                    return int(m.group(1))
-
     return None
 
 
@@ -126,7 +103,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         self,
         base_dir:          str,
         prompt:            str,
-        mask_email:        str,
+        mask_email:        str,      # fallback jika tidak ada relay_config.json
         output_dir:        str,
         config:            dict,
         log_callback:      Optional[Callable] = None,
@@ -134,20 +111,26 @@ class GeminiEnterpriseProcessor(threading.Thread):
         finished_callback: Optional[Callable] = None,
     ):
         super().__init__(daemon=True)
-        self.base_dir      = base_dir
-        self.prompt        = prompt
-        self.mask_email    = mask_email
-        self.output_dir    = output_dir or os.path.join(base_dir, "OUTPUT_GEMINI")
-        self.config        = config
-        self.log_cb        = log_callback
-        self.progress_cb   = progress_callback
-        self.finished_cb   = finished_callback
-        self._cancelled    = False
-        self._otp_reader   = GmailOTPReader(base_dir)
-        self.debug_dir     = os.path.join(base_dir, "DEBUG")
-        self.session_file  = os.path.join(base_dir, "session", "gemini_session.json")
-        self._driver       = None
-        self._temp_profile = None
+        self.base_dir          = base_dir
+        self.prompt            = prompt
+        self.fallback_email    = mask_email   # email dari config (fallback)
+        self.output_dir        = output_dir or os.path.join(base_dir, "OUTPUT_GEMINI")
+        self.config            = config
+        self.log_cb            = log_callback
+        self.progress_cb       = progress_callback
+        self.finished_cb       = finished_callback
+        self._cancelled        = False
+        self._otp_reader       = GmailOTPReader(base_dir)
+        self.debug_dir         = os.path.join(base_dir, "DEBUG")
+        self.session_file      = os.path.join(base_dir, "session", "gemini_session.json")
+        self._driver           = None
+        self._temp_profile     = None
+        # Mask yang dibuat untuk sesi ini (untuk dihapus setelah selesai)
+        self._current_mask_id  = None
+        self._current_mask_email = None
+        # Firefox Relay instance
+        relay_key = FirefoxRelay.load_key(base_dir)
+        self._relay = FirefoxRelay(relay_key) if relay_key else None
 
     def _log(self, msg, level="INFO"):
         if self.log_cb:
@@ -164,6 +147,53 @@ class GeminiEnterpriseProcessor(threading.Thread):
     def cancel(self):
         self._cancelled = True
 
+    # ── Email mask management ─────────────────────────────────────────────────
+    def _create_new_mask(self) -> str:
+        """
+        Buat email mask baru via Firefox Relay.
+        Return alamat mask (mis. abc123@mozmail.com).
+        Fallback ke self.fallback_email jika Relay tidak tersedia.
+        """
+        if self._relay:
+            try:
+                ts_label = f"gemini-veo-{int(time.time())}"
+                result = self._relay.create_mask(label=ts_label)
+                addr   = result.get("full_address", "")
+                mask_id = result.get("id")
+                if addr:
+                    self._current_mask_id    = mask_id
+                    self._current_mask_email = addr
+                    self._log(f"   📨 Mask baru: {addr} (id={mask_id})", "SUCCESS")
+                    return addr
+            except Exception as e:
+                self._log(f"   ⚠️  Gagal buat mask baru: {e} — pakai fallback", "WARNING")
+
+        # Fallback: gunakan email dari config
+        self._current_mask_email = self.fallback_email
+        self._current_mask_id    = None
+        self._log(f"   📧 Fallback email: {self.fallback_email}", "WARNING")
+        return self.fallback_email
+
+    def _delete_current_mask(self):
+        """Hapus mask yang dipakai di sesi ini (cleanup)."""
+        if self._relay and self._current_mask_id:
+            try:
+                ok = self._relay.delete_mask(self._current_mask_id)
+                if ok:
+                    self._log(
+                        f"   🗑️  Mask {self._current_mask_email} dihapus (id={self._current_mask_id})",
+                        "WARNING"
+                    )
+                else:
+                    self._log(
+                        f"   ⚠️  Gagal hapus mask {self._current_mask_id}",
+                        "WARNING"
+                    )
+            except Exception as e:
+                self._log(f"   ⚠️  Delete mask error: {e}", "WARNING")
+            self._current_mask_id    = None
+            self._current_mask_email = None
+
     # ── Debug ────────────────────────────────────────────────────────────────
     def _debug_dump(self, driver, label: str):
         try:
@@ -172,25 +202,21 @@ class GeminiEnterpriseProcessor(threading.Thread):
             driver.save_screenshot(os.path.join(self.debug_dir, f"{label}_{ts}.png"))
             with open(os.path.join(self.debug_dir, f"{label}_{ts}.html"), "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
-            self._log(f"🔍 DEBUG: DEBUG/{label}_{ts}.*", "WARNING")
-        except Exception as e:
-            self._log(f"⚠️  Debug dump gagal: {e}", "WARNING")
+        except Exception:
+            pass
 
     # ── UC Driver ────────────────────────────────────────────────────────────
     def _create_driver(self) -> Optional[object]:
         if uc is None:
             self._log("❌ undetected-chromedriver tidak terinstall!", "ERROR")
-            self._log("   → pip install undetected-chromedriver selenium", "ERROR")
             return None
 
-        # Deteksi versi Chrome
         chrome_ver = _get_chrome_version()
         if chrome_ver:
-            self._log(f"   💻 Chrome versi terdeteksi: {chrome_ver}", "SUCCESS")
+            self._log(f"   💻 Chrome versi: {chrome_ver}", "SUCCESS")
         else:
-            self._log("⚠️  Versi Chrome tidak terdeteksi, UC akan auto-detect", "WARNING")
+            self._log("⚠️  Versi Chrome tidak terdeteksi", "WARNING")
 
-        # Fresh temp profile
         self._temp_profile = tempfile.mkdtemp(prefix="gemini_uc_profile_")
         self._log(f"   📂 Fresh profile: {self._temp_profile}")
 
@@ -206,60 +232,43 @@ class GeminiEnterpriseProcessor(threading.Thread):
         options.add_argument("--lang=en-US")
         options.add_argument("--window-size=1280,900")
         options.add_argument("--disable-popup-blocking")
-
-        prefs = {
-            "intl.accept_languages": "en,en_US",
+        options.add_experimental_option("prefs", {
+            "intl.accept_languages":     "en,en_US",
             "download.default_directory": self.output_dir,
             "download.prompt_for_download": False,
             "download.directory_upgrade": True,
-            "safebrowsing.enabled": True,
-        }
-        options.add_experimental_option("prefs", prefs)
-
+            "safebrowsing.enabled":       True,
+        })
         if headless:
             options.add_argument("--headless=new")
 
-        # Coba dengan version_main sesuai Chrome, fallback ke None jika gagal
         for ver in ([chrome_ver, None] if chrome_ver else [None]):
             try:
                 ver_label = str(ver) if ver else "auto"
-                self._log(f"   → Mencoba UC dengan version_main={ver_label}...")
-                driver = uc.Chrome(
-                    options=options,
-                    use_subprocess=True,
-                    version_main=ver,
-                )
+                self._log(f"   → UC version_main={ver_label}...")
+                driver = uc.Chrome(options=options, use_subprocess=True, version_main=ver)
                 driver.execute_script(
                     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
                 )
                 self._log(f"✅ UC driver OK (version_main={ver_label})", "SUCCESS")
                 return driver
             except Exception as e:
-                err_msg = str(e)
-                self._log(f"   ⚠️  UC version_main={ver_label} gagal: {err_msg[:120]}", "WARNING")
-
-                # Coba parse versi dari pesan error jika ada mismatch
-                # "This version of ChromeDriver only supports Chrome version X"
-                # "Current browser version is Y"
-                m_browser = re.search(r"Current browser version is (\d+)", err_msg)
-                if m_browser:
-                    detected = int(m_browser.group(1))
-                    if detected != ver:
-                        self._log(f"   🔍 Browser version dari error: {detected}, retry...", "WARNING")
-                        try:
-                            driver2 = uc.Chrome(
-                                options=options,
-                                use_subprocess=True,
-                                version_main=detected,
-                            )
-                            driver2.execute_script(
-                                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-                            )
-                            self._log(f"✅ UC driver OK (version_main={detected} dari error msg)", "SUCCESS")
-                            return driver2
-                        except Exception as e2:
-                            self._log(f"   ❌ Retry version {detected} juga gagal: {str(e2)[:80]}", "ERROR")
-                continue
+                err = str(e)
+                self._log(f"   ⚠️  version_main={ver_label} gagal: {err[:100]}", "WARNING")
+                m = re.search(r"Current browser version is (\d+)", err)
+                if m:
+                    detected = int(m.group(1))
+                    self._log(f"   🔍 Retry version_main={detected} dari error msg...", "WARNING")
+                    try:
+                        driver2 = uc.Chrome(options=options, use_subprocess=True,
+                                            version_main=detected)
+                        driver2.execute_script(
+                            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                        )
+                        self._log(f"✅ UC driver OK (version_main={detected})", "SUCCESS")
+                        return driver2
+                    except Exception as e2:
+                        self._log(f"   ❌ Retry {detected} gagal: {str(e2)[:80]}", "ERROR")
 
         self._log("❌ Semua percobaan UC driver gagal.", "ERROR")
         return None
@@ -271,11 +280,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         except Exception:
             pass
         if self._temp_profile and os.path.exists(self._temp_profile):
-            try:
-                shutil.rmtree(self._temp_profile, ignore_errors=True)
-                self._log(f"   🗑️  Temp profile dihapus")
-            except Exception:
-                pass
+            shutil.rmtree(self._temp_profile, ignore_errors=True)
 
     # ── Session ──────────────────────────────────────────────────────────────
     def _has_valid_session(self) -> bool:
@@ -293,32 +298,23 @@ class GeminiEnterpriseProcessor(threading.Thread):
         try:
             with open(self.session_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-
-            if isinstance(data, list):
-                cookies = data
-            else:
-                # Playwright format → Selenium
-                cookies = []
-                for c in data.get("cookies", []):
-                    ck = {"name": c.get("name",""), "value": c.get("value",""),
-                          "domain": c.get("domain",""), "path": c.get("path","/")}
-                    if c.get("expires", 0) > 0:
-                        ck["expiry"] = int(c["expires"])
-                    ck["httpOnly"] = c.get("httpOnly", False)
-                    ck["secure"]   = c.get("secure", False)
-                    cookies.append(ck)
-
+            cookies = data if isinstance(data, list) else [
+                {"name": c.get("name",""), "value": c.get("value",""),
+                 "domain": c.get("domain",""), "path": c.get("path","/"),
+                 "expiry": int(c["expires"]) if c.get("expires",0) > 0 else None,
+                 "httpOnly": c.get("httpOnly", False),
+                 "secure": c.get("secure", False)}
+                for c in data.get("cookies", [])
+            ]
             driver.get("https://business.gemini.google/")
             time.sleep(2)
-
             loaded = 0
             for ck in cookies:
                 try:
-                    driver.add_cookie(ck)
+                    driver.add_cookie({k: v for k, v in ck.items() if v is not None})
                     loaded += 1
                 except Exception:
                     pass
-
             self._log(f"   ✅ {loaded}/{len(cookies)} cookies dimuat", "SUCCESS")
             return loaded > 0
         except Exception as e:
@@ -333,9 +329,9 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 json.dump(cookies, f, indent=2)
             self._log(f"💾 Session tersimpan ({len(cookies)} cookies)", "SUCCESS")
         except Exception as e:
-            self._log(f"⚠️  Gagal simpan session: {e}", "WARNING")
+            self._log(f"   ⚠️  Gagal simpan session: {e}", "WARNING")
 
-    # ── Helpers ──────────────────────────────────────────────────────────────
+    # ── Selenium helpers ─────────────────────────────────────────────────────
     def _wait_for(self, driver, css_selector, timeout=15):
         try:
             return WebDriverWait(driver, timeout).until(
@@ -384,18 +380,18 @@ class GeminiEnterpriseProcessor(threading.Thread):
                         time.sleep(random.uniform(2.5, 4.0))
                         return True
         except Exception as e:
-            self._log(f"   ⚠️  Click retry error: {e}", "WARNING")
+            self._log(f"   ⚠️  Click retry: {e}", "WARNING")
         return False
 
-    # ── Main ─────────────────────────────────────────────────────────────────
+    # ── Main run ──────────────────────────────────────────────────────────────
     def run(self):
         os.makedirs(self.output_dir, exist_ok=True)
 
         use_session = self._has_valid_session()
         if use_session:
-            self._log("🔑 Session ditemukan → skip login", "SUCCESS")
+            self._log("🔑 Session ditemukan → skip login & mask", "SUCCESS")
         else:
-            self._log("⚠️  Session tidak ada → Login otomatis", "WARNING")
+            self._log("⚠️  Session tidak ada → Login otomatis + mask baru", "WARNING")
 
         driver = self._create_driver()
         if driver is None:
@@ -415,37 +411,42 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._done(False, str(e))
         finally:
             self._quit_driver(driver)
+            # Hapus mask setelah sesi selesai (sukses maupun gagal)
+            self._delete_current_mask()
 
     # ── Automation ───────────────────────────────────────────────────────────
     def _run_automation(self, driver, use_session: bool) -> Optional[str]:
         self._progress(5, "Membuka Gemini Enterprise...")
         self._log("🌐 Membuka https://business.gemini.google/ ...")
 
+        # ── Mode session (skip mask + login) ─────────────────────────────────
         if use_session:
             ok = self._load_session(driver)
             if ok:
                 driver.refresh()
                 time.sleep(random.uniform(3, 5))
                 current = driver.current_url
-                self._log(f"   URL: {current}")
                 if not any(x in current for x in ["signin", "login", "accounts.google"]):
                     self._log("✅ Session valid! Langsung ke dashboard.", "SUCCESS")
-                    self._progress(50, "Session OK, buka menu Veo...")
+                    self._progress(50, "Session OK...")
                     return self._run_veo(driver)
                 else:
                     self._log("⚠️  Session expired, fallback ke login...", "WARNING")
             else:
                 self._log("⚠️  Gagal load session, fallback ke login...", "WARNING")
 
+        # ── Login otomatis dengan mask BARU tiap attempt ──────────────────────
         for attempt in range(1, MAX_LOGIN_RETRY + 1):
             if self._cancelled:
                 return None
 
-            self._log(f"🔄 Login attempt {attempt}/{MAX_LOGIN_RETRY}...")
+            # Buat mask baru di tiap attempt (agar tidak terdetect pola berulang)
+            active_email = self._create_new_mask()
+            self._log(f"🔄 Login attempt {attempt}/{MAX_LOGIN_RETRY} — email: {active_email}")
             self._progress(8, f"Login attempt {attempt}/{MAX_LOGIN_RETRY}...")
 
+            # Warm-up
             if attempt == 1:
-                self._log("   → Warm-up google.com...")
                 driver.get("https://www.google.com")
                 time.sleep(random.uniform(2, 3.5))
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 3)")
@@ -453,17 +454,16 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
             driver.get(GEMINI_HOME_URL)
             time.sleep(random.uniform(3, 5))
-            current = driver.current_url
-            self._log(f"   URL: {current}")
             self._debug_dump(driver, f"attempt{attempt}_redirect")
 
             if self._is_error_page(driver):
                 self._log(f"⚠️  Error page sebelum input (attempt {attempt})", "WARNING")
                 if attempt < MAX_LOGIN_RETRY and self._click_signin_retry(driver):
+                    # Hapus mask yang baru dibuat, akan dibuat lagi di attempt berikutnya
+                    self._delete_current_mask()
                     time.sleep(random.uniform(2, 3))
                     continue
-                else:
-                    break
+                break
 
             self._progress(10, "Menunggu form login...")
             email_el = None
@@ -477,15 +477,16 @@ class GeminiEnterpriseProcessor(threading.Thread):
             if not email_el:
                 self._log("   ❌ Form email tidak ditemukan!", "ERROR")
                 self._debug_dump(driver, f"attempt{attempt}_no_email")
+                self._delete_current_mask()
                 continue
 
-            self._log(f"📧 Input email: {self.mask_email}")
+            self._log(f"📧 Input email: {active_email}")
             try:
-                self._human_type(driver, email_el, self.mask_email)
+                self._human_type(driver, email_el, active_email)
                 val = email_el.get_attribute("value")
-                if val != self.mask_email:
+                if val != active_email:
                     email_el.clear()
-                    email_el.send_keys(self.mask_email)
+                    email_el.send_keys(active_email)
                     time.sleep(0.5)
                 self._log(f"   ✅ Value: '{val}'")
                 time.sleep(random.uniform(0.9, 1.8))
@@ -500,7 +501,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
                         break
 
                 if submit_el:
-                    self._log(f"   → Submit: '{submit_el.text.strip()}'")
                     self._human_click(driver, submit_el)
                 else:
                     from selenium.webdriver.common.keys import Keys
@@ -512,11 +512,13 @@ class GeminiEnterpriseProcessor(threading.Thread):
             except Exception as e:
                 self._log(f"   ❌ Error input email: {e}", "ERROR")
                 self._debug_dump(driver, f"attempt{attempt}_email_error")
+                self._delete_current_mask()
                 continue
 
             if self._is_error_page(driver):
                 self._log(f"⚠️  'Let's try something else' (attempt {attempt})", "WARNING")
                 self._debug_dump(driver, f"attempt{attempt}_error_after_submit")
+                self._delete_current_mask()
                 if attempt < MAX_LOGIN_RETRY and self._click_signin_retry(driver):
                     for sel in EMAIL_SELECTORS:
                         el = self._wait_for(driver, sel, timeout=12)
@@ -529,23 +531,25 @@ class GeminiEnterpriseProcessor(threading.Thread):
             if self._cancelled:
                 return None
 
-            # OTP
+            # ── OTP polling (ambil pesan TERBARU) ──────────────────────────
             self._progress(20, "Menunggu OTP...")
             self._log(f"   URL: {driver.current_url}")
             self._debug_dump(driver, "otp_page")
 
             otp_code = None
             reg_ts   = int(time.time())
+            self._log(f"   ⏱️  OTP cutoff timestamp: {reg_ts}")
 
             for otp_try in range(1, MAX_OTP_RETRY + 1):
-                self._log(f"📬 Polling OTP ({otp_try}/{MAX_OTP_RETRY})...")
+                self._log(f"📬 Polling OTP ({otp_try}/{MAX_OTP_RETRY}) — mask: {active_email}...")
                 try:
                     otp_code = self._otp_reader.wait_for_otp(
-                        sender="noreply-googlecloud@google.com",
-                        timeout=OTP_TIMEOUT, interval=5,
-                        log_callback=self.log_cb,
-                        mask_email=self.mask_email,
-                        after_timestamp=reg_ts,
+                        sender          = "noreply-googlecloud@google.com",
+                        timeout         = OTP_TIMEOUT,
+                        interval        = 5,
+                        log_callback    = self.log_cb,
+                        mask_email      = active_email,   # filter by mask terbaru
+                        after_timestamp = reg_ts,         # hanya email terbaru
                     )
                     self._log(f"✅ OTP: {otp_code}", "SUCCESS")
                     break
@@ -569,12 +573,13 @@ class GeminiEnterpriseProcessor(threading.Thread):
             if not otp_code:
                 self._log("❌ Gagal dapat OTP!", "ERROR")
                 self._debug_dump(driver, "otp_failed")
+                self._delete_current_mask()
                 return None
 
             if self._cancelled:
                 return None
 
-            # Input OTP
+            # ── Input OTP ─────────────────────────────────────────────────
             self._progress(35, "Memasukkan OTP...")
             try:
                 otp_inputs = driver.find_elements(By.CSS_SELECTOR,
@@ -603,7 +608,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
                     from selenium.webdriver.common.keys import Keys
                     driver.find_element(By.TAG_NAME, "body").send_keys(Keys.RETURN)
 
-                self._log("✅ OTP tersubmit, menunggu redirect...")
+                self._log("✅ OTP tersubmit...")
                 for _ in range(30):
                     time.sleep(1)
                     if "business.gemini.google" in driver.current_url:
@@ -624,10 +629,9 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 return None
 
         self._log("❌ Semua login attempt gagal.", "ERROR")
-        self._log("   → Jalankan Save_Session.bat untuk login manual.", "WARNING")
         return None
 
-    # ── Veo ──────────────────────────────────────────────────────────────────
+    # ── Veo ────────────────────────────────────────────────────────────────
     def _run_veo(self, driver) -> Optional[str]:
         self._progress(50, "Membuka menu Veo...")
         self._log("🎬 Mencari tombol tools...")
@@ -645,7 +649,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 el = self._wait_for(driver, sel, timeout=8)
                 if el and el.is_displayed():
                     tools_btn = el
-                    self._log(f"   ✅ Tools btn: [{sel}]")
                     break
 
             if not tools_btn:
@@ -689,7 +692,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
         # Prompt
         self._progress(60, "Input prompt...")
-        self._debug_dump(driver, "veo_open")
         try:
             prompt_el = None
             for sel in ["textarea", "[contenteditable='true']", "[role='textbox']"]:
@@ -697,10 +699,8 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 if el and el.is_displayed():
                     prompt_el = el
                     break
-
             if not prompt_el:
                 self._log("❌ Input prompt tidak ditemukan!", "ERROR")
-                self._debug_dump(driver, "no_prompt")
                 return None
 
             self._human_type(driver, prompt_el, self.prompt)
@@ -719,7 +719,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._log("✅ Prompt tersubmit!", "SUCCESS")
         except Exception as e:
             self._log(f"❌ Error prompt: {e}", "ERROR")
-            self._debug_dump(driver, "prompt_error")
             return None
 
         if self._cancelled:
@@ -727,10 +726,8 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
         # Polling
         self._progress(70, "Menunggu Veo generate...")
-        self._log(f"⏳ Polling max {VIDEO_GEN_TIMEOUT}s...")
         start = time.time()
         video_ready = False
-
         while time.time() - start < VIDEO_GEN_TIMEOUT:
             if self._cancelled:
                 return None
@@ -753,9 +750,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
         if not video_ready:
             self._debug_dump(driver, "polling_timeout")
-            return None
-
-        if self._cancelled:
             return None
 
         # Download
@@ -792,5 +786,4 @@ class GeminiEnterpriseProcessor(threading.Thread):
             raise Exception("File tidak muncul setelah 120s")
         except Exception as e:
             self._log(f"❌ Download gagal: {e}", "ERROR")
-            self._debug_dump(driver, "download_failed")
             return None
