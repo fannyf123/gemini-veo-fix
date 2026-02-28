@@ -23,19 +23,15 @@ Otomasi mailticking.com sesuai tampilan nyata:
   | [ Check emails button ]                  |
   +------------------------------------------+
 
-EXACT ELEMENTS dari inspect:
-  Tombol Change (klik berulang sampai email BUKAN @gmail/@googlemail):
-    <button class="btn btn-info" type="button" id="modalChange">
-      <i class="fa fa-random"></i>
-      <span class="d-none d-md-inline"> Change</span>
-    </button>
+EXACT JS PATH dari inspect element:
+  Step 3  - Checkbox type4:
+    document.querySelector("#type4")
 
-  Checkbox domain (TARGET - HANYA ini yang dicentang):
-    <input class="form-check-input type" type="checkbox" name="type" id="type4" value="4" checked="">
-    <label class="form-check-label" for="type4">abc@<b class="red">domain</b>.com</label>
+  Step 4a - Tombol Change:
+    document.querySelector("#modalChange")
 
-  Activate button:
-    <a href="javascript:;" class="btn btn-warning mx-auto btn-lg activeBtn">
+  Step 4b - Tombol Activate:
+    document.querySelector("#emailActivationModal > div > div > div.modal-footer.text-center > a")
 
   Email link di inbox:
     <a href="/mail/view/{hash}/" rel="nofollow">Gemini Enterprise verification code</a>
@@ -71,6 +67,20 @@ OTP_TEXT_COLORS = {
     "#1c3a70", "#1a73e8", "#4285f4", "#1558d6", "#1967d2",
     "#185abc", "#174ea6", "#0d47a1",
 }
+
+# ── Exact CSS selectors dari JS path inspect element ─────────────────────────
+# Step 3: Centang checkbox abc@domain.com
+_SEL_TYPE4_CHECKBOX = "#type4"
+
+# Step 4a: Tombol Change email
+_SEL_CHANGE_BTN = "#modalChange"
+
+# Step 4b: Tombol Activate di dalam modal
+_SEL_ACTIVATE_BTN = (
+    "#emailActivationModal > div > div "
+    "> div.modal-footer.text-center > a"
+)
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _is_banned_email(email: str) -> bool:
@@ -188,7 +198,7 @@ class MailtickingClient:
         try:
             WebDriverWait(driver, timeout).until(
                 EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "a.activeBtn, .activeBtn"))
+                    (By.CSS_SELECTOR, _SEL_ACTIVATE_BTN))
             )
             return True
         except TimeoutException:
@@ -222,11 +232,11 @@ class MailtickingClient:
     # -------------------------------------------------------------------------
     def get_fresh_email(self, driver) -> str:
         """
-        Step 3-6:
-          3. Klik button#modalChange berulang sampai email BUKAN @gmail/@googlemail
-          4. Centang HANYA input#type4 (abc@domain.com), uncheck semua lainnya
-          5. Klik a.activeBtn (Activate)
-          6. Tunggu halaman reload -> baca email dari input bar
+        Urutan yang benar:
+          1. Centang HANYA #type4 (abc@domain.com)
+          2. Klik #modalChange berulang sampai email bukan @gmail/@googlemail
+          3. Klik Activate (#emailActivationModal > ... > a)
+          4. Tunggu halaman reload -> baca email
         """
         modal_found = self._wait_for_modal(driver, timeout=12)
         if modal_found:
@@ -234,18 +244,18 @@ class MailtickingClient:
         else:
             self._log("Modal not detected, proceeding anyway...", "WARNING")
 
-        # Step 3: Loop klik Change sampai email bukan @gmail / @googlemail
-        email = self._click_change_until_non_gmail(driver)
-        self._log(f"Non-gmail email ready: {email}")
-
-        # Step 4: Centang HANYA type4 (abc@domain.com)
+        # Step 3: Centang HANYA #type4 dulu sebelum Change
         self._configure_checkboxes(driver)
         time.sleep(0.5)
 
-        # Step 5: Klik Activate
+        # Step 4a: Loop klik Change sampai email bukan @gmail / @googlemail
+        email = self._click_change_until_non_gmail(driver)
+        self._log(f"Non-gmail email ready: {email}")
+
+        # Step 4b: Klik Activate
         self._click_activate(driver)
 
-        # Step 6: Tunggu halaman reload
+        # Tunggu halaman reload
         self._log("Waiting for page to reload after Activate...")
         time.sleep(random.uniform(3, 5))
 
@@ -289,23 +299,14 @@ class MailtickingClient:
         self, driver, max_attempts: int = 20
     ) -> str:
         """
-        Klik button#modalChange berulang sampai email field BUKAN @gmail.com
-        maupun @googlemail.com (karena Google register butuh non-Gmail address).
+        Klik #modalChange berulang sampai email BUKAN @gmail.com / @googlemail.com.
 
-        EXACT: <button class="btn btn-info" type="button" id="modalChange">
-
-        Target: abc@domain.com (id=type4) -> domain selain gmail/googlemail
-
-        Alur per iterasi:
-          1. Baca email saat ini
-          2. Jika bukan @gmail.com DAN bukan @googlemail.com -> selesai
-          3. Klik Change button
-          4. Tunggu email di field berubah
-          5. Ulangi sampai max_attempts
+        Priority 0: document.querySelector("#modalChange")  <- exact JS path
+        Fallback  : button.btn-info text 'Change'
         """
         CHANGE_SELECTORS = [
+            _SEL_CHANGE_BTN,              # Priority 0: exact -> "#modalChange"
             "button#modalChange",
-            "#modalChange",
             "button.btn-info#modalChange",
         ]
 
@@ -328,16 +329,14 @@ class MailtickingClient:
         for attempt in range(1, max_attempts + 1):
             current_email = self._read_email_from_modal(driver)
 
-            # Kondisi sukses: email ada dan bukan banned domain
             if current_email and not _is_banned_email(current_email):
                 self._log(
                     f"Email valid (non-gmail) on attempt {attempt}: {current_email}")
                 return current_email
 
-            reason = "(kosong)" if not current_email else f"'{current_email}' adalah @gmail/@googlemail"
-            self._log(
-                f"Attempt {attempt}/{max_attempts}: {reason}, klik Change..."
-            )
+            reason = "(kosong)" if not current_email else (
+                f"'{current_email}' adalah @gmail/@googlemail")
+            self._log(f"Attempt {attempt}/{max_attempts}: {reason}, klik Change...")
 
             btn = _find_change_btn()
             if not btn:
@@ -346,7 +345,6 @@ class MailtickingClient:
 
             self._js_click(driver, btn)
 
-            # Tunggu email berubah (max 3 detik polling)
             deadline = time.time() + 3
             while time.time() < deadline:
                 time.sleep(0.4)
@@ -355,88 +353,52 @@ class MailtickingClient:
                     break
 
         last_email = self._read_email_from_modal(driver)
-        self._log(
-            f"Max attempts reached. Last email: {last_email}", "WARNING")
+        self._log(f"Max attempts reached. Last email: {last_email}", "WARNING")
         return last_email
 
     # -------------------------------------------------------------------------
     def _configure_checkboxes(self, driver):
         """
-        Centang HANYA id="type4" (abc@domain.com).
-        Uncheck semua checkbox lain (type1, type2, type3, dll).
+        Centang HANYA #type4 (abc@domain.com), uncheck semua lainnya.
 
-        EXACT dari inspect:
-          <input class="form-check-input type" type="checkbox"
-                 name="type" id="type4" value="4" checked="">
-          <label class="form-check-label" for="type4">
-            abc@<b class="red">domain</b>.com
-          </label>
+        Priority 0: document.querySelector("#type4")  <- exact JS path
+        Fallback  : cari semua input[name='type'] dan match by id/value/label
         """
+        # Priority 0: exact selector #type4
+        try:
+            cb = driver.find_element(By.CSS_SELECTOR, _SEL_TYPE4_CHECKBOX)
+            if not cb.is_selected():
+                self._js_click(driver, cb)
+                time.sleep(0.2)
+                self._log("Checked: abc@domain.com (#type4) via exact selector")
+            else:
+                self._log("Already checked: abc@domain.com (#type4)")
+        except Exception as e:
+            self._log(f"#type4 not found via exact selector: {e}", "WARNING")
+
+        # Uncheck semua checkbox lain (type1, type2, type3, dst)
         try:
             checkboxes = driver.find_elements(
                 By.CSS_SELECTOR, "input[type='checkbox'][name='type']")
             if not checkboxes:
                 checkboxes = driver.find_elements(
                     By.CSS_SELECTOR, "input[type='checkbox']")
-            if not checkboxes:
-                self._log("No checkboxes found in modal", "WARNING")
-                return
 
             for cb in checkboxes:
                 try:
-                    cb_id    = cb.get_attribute("id") or ""
-                    cb_value = (cb.get_attribute("value") or "").strip()
+                    cb_id = cb.get_attribute("id") or ""
+                    if cb_id == "type4":
+                        continue  # sudah dihandle di atas
 
-                    # Ambil label text untuk deteksi
-                    label_text = ""
-                    if cb_id:
-                        try:
-                            lbl = driver.find_element(
-                                By.XPATH, f"//label[@for='{cb_id}']")
-                            label_text = lbl.text.lower()
-                        except Exception:
-                            pass
-                    if not label_text:
-                        try:
-                            parent = cb.find_element(By.XPATH, "..")
-                            label_text = parent.text.lower()
-                        except Exception:
-                            pass
-
-                    # id="type4" ATAU value="4" ATAU label mengandung "domain"
-                    # dan TIDAK mengandung "gmail" atau "googlemail"
-                    is_domain = (
-                        cb_id == "type4"
-                        or cb_value == "4"
-                        or (
-                            "domain" in label_text
-                            and "gmail" not in label_text
-                            and "googlemail" not in label_text
-                        )
-                    )
-
-                    currently_checked = cb.is_selected()
-
-                    if is_domain:
-                        if not currently_checked:
-                            self._js_click(driver, cb)
-                            time.sleep(0.2)
-                            self._log(f"Checked: abc@domain.com (id={cb_id})")
-                        else:
-                            self._log(f"Already checked: abc@domain.com (id={cb_id})")
-                    else:
-                        if currently_checked:
-                            self._js_click(driver, cb)
-                            time.sleep(0.2)
-
-                except StaleElementReferenceException:
-                    continue
-                except Exception:
+                    if cb.is_selected():
+                        self._js_click(driver, cb)
+                        time.sleep(0.2)
+                except (StaleElementReferenceException, Exception):
                     continue
 
-            self._log("Checkboxes configured: only abc@domain.com (type4) selected")
+            self._log("Checkboxes configured: only #type4 selected")
         except Exception as e:
-            self._log(f"Checkbox config error: {e}", "WARNING")
+            self._log(f"Checkbox uncheck error: {e}", "WARNING")
 
     def _read_current_email(self, driver) -> str:
         return self._read_email_from_modal(driver)
@@ -467,8 +429,22 @@ class MailtickingClient:
 
     def _click_activate(self, driver):
         """
-        EXACT: <a href="javascript:;" class="btn btn-warning mx-auto btn-lg activeBtn">
+        Priority 0: document.querySelector(
+            "#emailActivationModal > div > div > div.modal-footer.text-center > a"
+        )  <- exact JS path dari inspect element
+
+        Fallback: a.activeBtn, a.btn-warning.activeBtn, text 'activat'
         """
+        # Priority 0: exact path
+        try:
+            el = driver.find_element(By.CSS_SELECTOR, _SEL_ACTIVATE_BTN)
+            self._js_click(driver, el)
+            self._log("Clicked Activate button (exact path: #emailActivationModal > ... > a)")
+            return
+        except Exception as e:
+            self._log(f"Activate exact path not found: {e}", "WARNING")
+
+        # Fallback 1: class-based selectors
         for sel in [
             "a.activeBtn",
             "a.btn-warning.activeBtn",
@@ -479,19 +455,22 @@ class MailtickingClient:
                 el = driver.find_element(By.CSS_SELECTOR, sel)
                 if el.is_displayed():
                     self._js_click(driver, el)
-                    self._log("Clicked Activate button (a.activeBtn)")
+                    self._log(f"Clicked Activate button (fallback: {sel})")
                     return
             except Exception:
                 pass
+
+        # Fallback 2: text-based
         for tag in ["a", "button"]:
             for el in driver.find_elements(By.TAG_NAME, tag):
                 try:
                     if "activat" in el.text.lower() and el.is_displayed():
                         self._js_click(driver, el)
-                        self._log(f"Clicked Activate button (fallback {tag})")
+                        self._log(f"Clicked Activate button (text fallback: {tag})")
                         return
                 except Exception:
                     pass
+
         self._log("Activate button not found", "WARNING")
 
     def _click_check_emails(self, driver) -> bool:
@@ -561,13 +540,15 @@ class MailtickingClient:
                 time.sleep(random.uniform(2, 3))
 
                 try:
-                    act_btn = driver.find_elements(By.CSS_SELECTOR, "a.activeBtn, .activeBtn")
-                    if any(b.is_displayed() for b in act_btn):
-                        for b in act_btn:
-                            if b.is_displayed():
-                                self._js_click(driver, b)
-                                time.sleep(1.5)
-                                break
+                    act_btns = driver.find_elements(
+                        By.CSS_SELECTOR,
+                        f"{_SEL_ACTIVATE_BTN}, a.activeBtn, .activeBtn"
+                    )
+                    for b in act_btns:
+                        if b.is_displayed():
+                            self._js_click(driver, b)
+                            time.sleep(1.5)
+                            break
                 except Exception:
                     pass
 
