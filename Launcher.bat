@@ -5,10 +5,15 @@ color 0A
 
 echo.
 echo  ============================================
-echo    Gemini Veo Tester
+echo    Gemini Veo Tester (GUI Mode)
 echo    business.gemini.google automation
 echo  ============================================
 echo.
+
+if exist .venv\Scripts\activate.bat (
+    echo [INFO] Mengaktifkan Virtual Environment...
+    call .venv\Scripts\activate.bat
+)
 
 echo [INFO] Menginstall dependencies...
 pip install -r requirements.txt
@@ -22,7 +27,7 @@ if errorlevel 1 (
 echo.
 echo [INFO] Menjalankan tester...
 echo.
-python main.py
+python gui.py
 
 if errorlevel 1 (
     echo.
