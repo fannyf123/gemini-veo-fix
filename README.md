@@ -1,125 +1,166 @@
-# 🎬 Gemini Veo Tester
+# 🎬 Gemini Veo Auto Generator
 
-**Otomasi generate video via [business.gemini.google](https://business.gemini.google) menggunakan Playwright + OTP Gmail**
-
-> ⚠️ Repo ini untuk keperluan **testing / eksperimen pribadi**.
+Otomasi **generate video AI** menggunakan [Gemini Business (Veo)](https://business.gemini.google/) dengan akun temp email dari [mailticking.com](https://mailticking.com). Auto-switch akun saat rate limit.
 
 ---
 
-## ✨ Cara Kerja
-
-```
-1. Playwright     → buka auth.business.gemini.google/login
-2. Input email mask (dari config.json) → request OTP
-3. Gmail API      → baca OTP otomatis (cari di Inbox + Spam)
-4. Submit OTP     → masuk dashboard Gemini Enterprise
-5. Klik "+" → "Create videos with Veo"
-6. Input prompt dari prompts.txt
-7. Polling → tunggu video selesai di-generate
-8. Download → simpan ke OUTPUT_GEMINI/
-```
-
----
-
-## 📦 Requirements
-
-- Python **3.10+**
-- **Google Chrome** terinstall (wajib, untuk bypass bot-detection)
-- Gmail + Google API `credentials.json`
-- Email mask Firefox Relay yang sudah ada
-
----
-
-## 🚀 Setup & Jalankan
-
-### 1. Clone repo
-```bash
-git clone https://github.com/fannyf123/gemini-veo-tester.git
-cd gemini-veo-tester
-```
-
-### 2. Install dependencies
-```bash
-pip install -r requirements.txt
-playwright install chromium
-```
-
-### 3. Setup Gmail OAuth
-Letakkan `credentials.json` (Gmail API) di root folder.
-
-### 4. Isi `config.json`
-```json
-{
-  "mask_email":  "namaemailkamu@mozmail.com",
-  "relay_api_key": "",
-  "output_dir":  "",
-  "headless":    false,
-  "max_workers": 1
-}
-```
-> Isi `mask_email` dengan email mask yang sudah ada di [relay.firefox.com/accounts/masks](https://relay.firefox.com/accounts/masks/).
-> `relay_api_key` tidak wajib diisi.
-
-### 5. Isi `prompts.txt`
-```
-A cinematic aerial shot of rice fields in Bali at golden hour
-A futuristic city at night with neon lights, rain, slow motion
-```
-Satu prompt per baris.
-
-### 6. Jalankan
-```bash
-Launcher.bat        # Windows
-bash Launcher.sh    # Linux/macOS
-python main.py      # Manual
-```
-
----
-
-## ⚠️ Catatan Penting
-
-### OTP Masuk Spam?
-**Normal.** Kode sudah otomatis mencari OTP di folder **Inbox DAN Spam** sekaligus.
-Email dari Google via Firefox Relay sering masuk spam.
-Jika ditemukan di spam, email otomatis dipindahkan ke Inbox.
-
-### Google Mendeteksi Bot?
-Pastikan **Google Chrome** sudah terinstall. Kode memprioritaskan Chrome asli dibanding Chromium untuk menghindari bot-detection.
-```bash
-# Cek Chrome tersedia untuk Playwright:
-python -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(channel='chrome'); print('Chrome OK'); b.close(); p.stop()"
-```
-
----
-
-## 📁 Struktur Proyek
+## 📁 Struktur Repo
 
 ```
 gemini-veo-tester/
 ├── App/
 │   ├── __init__.py
-│   ├── firefox_relay.py       # Firefox Relay API wrapper (opsional)
-│   ├── gmail_otp.py           # Gmail OTP reader (cari di Inbox+Spam)
-│   ├── gemini_enterprise.py   # Core: Playwright automation + anti-bot
-│   └── gemini_batch.py        # Batch multi-prompt processor
-├── main.py                    # Entry point (CLI)
-├── config.json                # Konfigurasi (isi mask_email)
-├── prompts.txt                # Daftar prompt video
-├── credentials.json           # (tidak di-commit) Gmail API
-├── requirements.txt
-├── Launcher.bat
-└── Launcher.sh
+│   ├── _stealth_compat.py       # Selenium stealth helper
+│   ├── gemini_enterprise.py     # Core: otomasi Gemini Business + Veo
+│   └── mailticking.py           # Core: temp email + OTP via mailticking.com
+├── Launcher.bat                 # Windows: jalankan app
+├── Launcher.sh                  # Linux/Mac: jalankan app
+├── main.py                      # Entry point GUI
+├── diagnose.py                  # Cek environment (Chrome, ChromeDriver, deps)
+├── prompts.txt                  # Daftar prompt video (1 prompt per baris)
+├── config.default.json          # Template konfigurasi
+├── requirements.txt             # Dependencies Python
+└── OUTPUT_GEMINI/               # Folder output video (dibuat otomatis)
 ```
 
 ---
 
-## ⚙️ Config
+## ⚙️ Requirements
 
-| Key | Keterangan |
+- **Python** 3.9+
+- **Google Chrome** (versi terbaru)
+- **ChromeDriver** (auto-download jika tidak ada)
+- Koneksi internet aktif
+
+### Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+`requirements.txt` berisi:
+```
+selenium
+selenium-stealth
+beautifulsoup4
+lxml
+```
+
+---
+
+## 🚀 Cara Pakai
+
+### Windows
+```
+Double-click Launcher.bat
+```
+
+### Linux / Mac
+```bash
+bash Launcher.sh
+```
+
+### Manual
+```bash
+python main.py
+```
+
+---
+
+## 📝 Setup Prompts
+
+Edit file `prompts.txt` — satu prompt per baris:
+```
+A golden sunset over a mountain lake with reflections
+A futuristic city at night with flying cars
+A close-up of a butterfly landing on a flower in slow motion
+```
+
+---
+
+## ⚙️ Konfigurasi
+
+Salin `config.default.json` → `config.json`, lalu edit:
+```json
+{
+  "delay": 5,
+  "retry": 1,
+  "headless": false
+}
+```
+
+| Key | Default | Keterangan |
+|---|---|---|
+| `delay` | `5` | Jeda (detik) antar prompt |
+| `retry` | `1` | Jumlah retry jika error |
+| `headless` | `false` | Jalankan tanpa tampilan browser |
+
+---
+
+## 🔄 Alur Otomasi (25 Step)
+
+```
+Step 1  → Buka Chrome profil baru (temp profile)
+Step 2  → Buka mailticking.com - tunggu halaman load penuh
+Step 3  → Uncheck semua checkbox KECUALI id="type3" (abc@googlemail.com)
+Step 4  → Klik tombol Activate (a.activeBtn)
+Step 5  → Tunggu halaman reload → email aktif tersimpan
+Step 6  → Buka business.gemini.google di tab baru
+Step 7  → Input email ke input#email-input
+Step 8  → Klik 'Continue with email' (button#log-in-button)
+Step 9  → Tunggu halaman OTP load
+Step 10 → Kembali ke tab mailticking
+Step 11 → Reload halaman mailticking untuk cek inbox
+Step 12 → Klik link 'Gemini Enterprise verification code'
+          (a[href*='/mail/view/'] rel="nofollow")
+Step 13 → Tunggu & baca kode OTP dari span.verification-code
+Step 14 → Kembali ke tab Gemini - input OTP ke input.J6L5wc
+Step 15 → Klik tombol Verify (.YUhpIc-RLmnJb)
+Step 16 → Tunggu form nama - input ke input[formcontrolname="fullName"]
+Step 17 → Klik 'Agree & get started' (span.mdc-button__label)
+Step 18 → Tunggu h1.title 'Signing you in...' hilang
+Step 19 → Tutup popup awal (span.touch = "I'll do this later")
+Step 20 → Klik tools button (md-icon: page_info)
+Step 21 → Pilih 'Create videos with Veo' (div[slot='headline'])
+Step 22 → Input prompt ke div.ProseMirror editor
+Step 23 → Tekan Enter untuk generate
+Step 24 → Tunggu div.thinking-message hilang → tunggu video render
+Step 25 → Download video → simpan ke OUTPUT_GEMINI/
+```
+
+### Rate Limit Auto-Switch
+Jika `div.thinking-message` hilang dalam < 5 detik → terdeteksi **rate limit** → otomatis buat akun baru dan lanjut dari prompt yang gagal.
+
+---
+
+## 🔍 Diagnosa & Troubleshoot
+
+Jalankan diagnose untuk cek environment:
+```bash
+python diagnose.py
+```
+
+Output screenshot debug tersimpan di folder `DEBUG/` secara otomatis saat error.
+
+### Masalah Umum
+
+| Masalah | Solusi |
 |---|---|
-| `mask_email` | **Wajib.** Email mask mozmail.com yang sudah ada |
-| `relay_api_key` | Tidak wajib (tidak dipakai untuk generate) |
-| `output_dir` | Folder simpan video (kosong = pakai `OUTPUT_GEMINI/`) |
-| `headless` | `false` = browser terlihat (recommended saat debug) |
-| `max_workers` | Jumlah prompt paralel (default: 1) |
-| `batch_stagger_delay` | Jeda detik antar worker batch |
+| ChromeDriver tidak cocok | Jalankan `diagnose.py` — auto-download driver yang sesuai |
+| Email tidak masuk di mailticking | Tunggu lebih lama atau cek koneksi internet |
+| OTP tidak terbaca | Screenshot debug ada di folder `DEBUG/` |
+| Video tidak ter-download | Cek folder `OUTPUT_GEMINI/` — mungkin masih `.crdownload` |
+
+---
+
+## 📌 Catatan Teknis
+
+- **OTP Input** (`input.J6L5wc`) menggunakan opacity:0 — script menggunakan JavaScript `dispatchEvent` agar Angular membaca nilai input
+- **ProseMirror editor** di-clear dengan `Ctrl+A → Delete` sebelum input prompt baru
+- **ChromeDriver** auto-download dari [Chrome for Testing API](https://googlechromelabs.github.io/chrome-for-testing/) jika versi tidak cocok
+- Semua file video output dinamai: `ReenzAuto_G-Business_{nomor}_{timestamp}.mp4`
+
+---
+
+## 📄 License
+
+Private — for personal use only.
