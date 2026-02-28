@@ -25,6 +25,7 @@ Alur lengkap (EXACT selectors dari inspect element):
   Step 16 : Tutup popup 'I'll do this later'
              -> Web Component Shadow DOM: pakai JS rekursif shadowRoot traversal
   Step 17 : Klik tools button (md-icon: page_info)
+             -> Web Component Shadow DOM: pakai JS rekursif shadowRoot traversal
   Step 18 : Pilih 'Create videos with Veo'
   Step 19 : Input prompt ke ProseMirror editor - tekan Enter
   Step 20 : Tunggu div.thinking-message hilang - tunggu video render
@@ -190,6 +191,60 @@ _JS_LIST_BUTTONS = """
     }
     scan(document, 0);
     return JSON.stringify(result);
+})();
+"""
+
+# JavaScript: cari tools button (md-icon-button dengan md-icon 'page_info'
+# atau aria-label/title mengandung keyword tool/gem/extension/app)
+# Traversal rekursif shadow DOM - sama seperti _JS_FIND_DISMISS_BTN
+_JS_FIND_TOOLS_BTN = """
+(function() {
+    var ARIA_KEYWORDS = ['tool', 'gem', 'extension', 'plugin', 'app'];
+
+    function hasToolAria(el) {
+        var aria  = (el.getAttribute('aria-label') || '').toLowerCase();
+        var title = (el.getAttribute('title') || '').toLowerCase();
+        return ARIA_KEYWORDS.some(function(k) {
+            return aria.indexOf(k) !== -1 || title.indexOf(k) !== -1;
+        });
+    }
+
+    function findInRoot(root, depth) {
+        if (depth > 10) return null;
+
+        // Prioritas 1: md-icon dengan text 'page_info' -> ambil ancestor button-nya
+        var icons = root.querySelectorAll('md-icon');
+        for (var k = 0; k < icons.length; k++) {
+            if ((icons[k].textContent || '').trim() === 'page_info') {
+                var parent = icons[k].parentElement;
+                for (var up = 0; up < 5; up++) {
+                    if (!parent) break;
+                    var tag = parent.tagName.toLowerCase();
+                    if (tag === 'md-icon-button' || tag === 'button') return parent;
+                    parent = parent.parentElement;
+                }
+                return icons[k]; // fallback: return icon itu sendiri
+            }
+        }
+
+        // Prioritas 2: md-icon-button atau button dengan aria-label/title tool-related
+        var candidates = root.querySelectorAll('md-icon-button, button');
+        for (var i = 0; i < candidates.length; i++) {
+            if (hasToolAria(candidates[i])) return candidates[i];
+        }
+
+        // Rekursif ke shadow roots
+        var all = root.querySelectorAll('*');
+        for (var j = 0; j < all.length; j++) {
+            if (all[j].shadowRoot) {
+                var found = findInRoot(all[j].shadowRoot, depth + 1);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+
+    return findInRoot(document, 0);
 })();
 """
 
@@ -405,7 +460,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
     def _js_click(self, driver, element):
         driver.execute_script("arguments[0].click();", element)
 
-    # ── Driver setup ──────────────────────────────────────────────────────
+    # ── Driver setup ───────────────────────────────────────────────────────
     def _create_driver(self) -> Optional[object]:
         self._log("Setting up fresh Chrome browser...")
         cd_path = _setup_chromedriver(self.base_dir, self._log)
@@ -537,7 +592,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         time.sleep(random.uniform(2, 3))
         self._log("Gemini Business page loaded.")
 
-    # ── Main run ──────────────────────────────────────────────────────────
+    # ── Main run ─────────────────────────────────────────────────────
     def run(self):
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -598,7 +653,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         else:
             self._done(False, "Cancelled.")
 
-    # ── Account registration ────────────────────────────────────────────
+    # ── Account registration ──────────────────────────────────────────────
     def _register_account(self, driver) -> bool:
         for retry in range(1, MAX_ACCOUNT_RETRY + 1):
             self._log(f"--- ACCOUNT REGISTRATION (Attempt {retry}/{MAX_ACCOUNT_RETRY}) ---")
@@ -780,7 +835,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         self._log("Account registration and setup completed successfully!")
         return True
 
-    # ── Submit email with error page retry ───────────────────────────────
+    # ── Submit email with error page retry ───────────────────────────────────────
     def _submit_email_with_retry(self, driver, email: str) -> bool:
         EMAIL_SELECTORS = [
             "input#email-input",
@@ -911,24 +966,48 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
         self._log("Step 17: Clicking tools button (page_info icon)...")
         tools_clicked = False
-        for sel in [
-            "md-icon-button[aria-label*='tool' i]",
-            "button[aria-label*='tool' i]",
-            "[slot='icon-button']",
-        ]:
-            try:
-                els = driver.find_elements(By.CSS_SELECTOR, sel)
-                for el in els:
-                    if el.is_displayed():
-                        self._human_click(driver, el)
-                        self._log(f"Tools button clicked: {sel}")
-                        tools_clicked = True
-                        break
-                if tools_clicked:
-                    break
-            except Exception:
-                pass
 
+        # Strategy 1: JS shadow DOM traversal (primary - md-icon-button is a Web Component)
+        # find_elements() CANNOT penetrate shadow roots; JS traversal is required
+        try:
+            btn = driver.execute_script(_JS_FIND_TOOLS_BTN)
+            if btn:
+                driver.execute_script("arguments[0].click();", btn)
+                self._log("Tools button clicked via shadow DOM JS traversal")
+                tools_clicked = True
+        except Exception as e:
+            self._log(f"Tools button JS traversal error: {e}", "WARNING")
+
+        # Strategy 2: CSS selectors with getBoundingClientRect visibility check
+        # (is_displayed() returns False for custom elements even when visible)
+        if not tools_clicked:
+            for sel in [
+                "md-icon-button[aria-label*='tool' i]",
+                "md-icon-button[aria-label*='gem' i]",
+                "md-icon-button[aria-label*='extension' i]",
+                "md-icon-button[aria-label*='app' i]",
+                "button[aria-label*='tool' i]",
+                "[slot='icon-button']",
+            ]:
+                try:
+                    els = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for el in els:
+                        try:
+                            visible = el.is_displayed() or driver.execute_script(
+                                "return arguments[0].getBoundingClientRect().width > 0;", el)
+                            if visible:
+                                driver.execute_script("arguments[0].click();", el)
+                                self._log(f"Tools button clicked: {sel}")
+                                tools_clicked = True
+                                break
+                        except Exception:
+                            pass
+                    if tools_clicked:
+                        break
+                except Exception:
+                    pass
+
+        # Strategy 3: light-DOM md-icon page_info fallback
         if not tools_clicked:
             try:
                 icons = driver.find_elements(By.TAG_NAME, "md-icon")
@@ -937,18 +1016,55 @@ class GeminiEnterpriseProcessor(threading.Thread):
                         try:
                             btn = icon.find_element(
                                 By.XPATH, "./ancestor::button | ./ancestor::md-icon-button")
-                            self._human_click(driver, btn)
+                            driver.execute_script("arguments[0].click();", btn)
                             self._log("Clicked tools button via md-icon page_info")
                             tools_clicked = True
                         except Exception:
-                            self._js_click(driver, icon)
+                            driver.execute_script("arguments[0].click();", icon)
                             tools_clicked = True
                         break
             except Exception:
                 pass
 
         if not tools_clicked:
-            self._log("Tools button not found", "WARNING")
+            self._log("Tools button not found - running debug scan...", "WARNING")
+            # Debug: log semua md-icon-button visible di shadow DOM untuk analisis
+            try:
+                raw = driver.execute_script("""
+                (function() {
+                    var result = [];
+                    function scan(root, depth) {
+                        if (depth > 8) return;
+                        var btns = root.querySelectorAll('md-icon-button, button[aria-label]');
+                        btns.forEach(function(b) {
+                            var rect = b.getBoundingClientRect();
+                            if (rect.width > 0) {
+                                result.push({
+                                    tag: b.tagName,
+                                    aria: b.getAttribute('aria-label') || '',
+                                    title: b.getAttribute('title') || '',
+                                    text: (b.textContent || '').trim().substring(0, 50)
+                                });
+                            }
+                        });
+                        root.querySelectorAll('*').forEach(function(el) {
+                            if (el.shadowRoot) scan(el.shadowRoot, depth + 1);
+                        });
+                    }
+                    scan(document, 0);
+                    return JSON.stringify(result);
+                })();
+                """)
+                btns_info = json.loads(raw) if raw else []
+                for info in btns_info:
+                    self._log(
+                        f"  [ICON-BTN] tag={info['tag']} aria='{info['aria'][:50]}' "
+                        f"title='{info['title'][:30]}' text='{info['text'][:40]}'",
+                        "WARNING"
+                    )
+            except Exception:
+                pass
+            self._debug_dump(driver, "tools_btn_not_found")
             return
 
         time.sleep(random.uniform(1, 1.5))
@@ -997,7 +1113,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         time.sleep(random.uniform(1, 2))
         self._log("Initial setup completed!")
 
-    # ── Dismiss 'I'll do this later' popup ────────────────────────────────
+    # ── Dismiss 'I'll do this later' popup ───────────────────────────────────────
     def _dismiss_later_popup(self, driver) -> bool:
         """
         Popup 'I'll do this later' di Gemini Business menggunakan Web Component
@@ -1103,7 +1219,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         self._debug_dump(driver, "dismiss_popup_failed")
         return False
 
-    # ── Process single prompt ───────────────────────────────────────────
+    # ── Process single prompt ───────────────────────────────────────────────
     def _process_prompt(
         self, driver, prompt: str, prompt_num: int, total: int, delay: int
     ) -> str:
