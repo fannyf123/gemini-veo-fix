@@ -7,8 +7,8 @@ Menggunakan selenium-stealth (regular Chrome) + fresh temp profile.
 Alur lengkap (EXACT selectors dari inspect element):
   Step 1  : Buka Chrome profil baru
   Step 2  : Buka mailticking.com - tunggu load penuh
-  Step 3  : Uncheck semua checkbox KECUALI id="type3" (abc@googlemail.com)
-  Step 4  : Klik a.activeBtn (Activate) - tunggu halaman reload
+  Step 3  : Loop klik Change sampai email bukan @gmail/@googlemail
+  Step 4  : Centang HANYA id="type4" (abc@domain.com) -> Activate
   Step 5  : Buka business.gemini.google di tab baru - tunggu load
   Step 6  : Input email ke input#email-input (jsname="YPqjbf")
   Step 7  : Klik button#log-in-button (Continue with email)
@@ -20,7 +20,10 @@ Alur lengkap (EXACT selectors dari inspect element):
   Step 13 : Tunggu form nama - input ke input[formcontrolname="fullName"]
   Step 14 : Klik span.mdc-button__label 'Agree & get started'
   Step 15 : Tunggu h1.title 'Signing you in...' hilang
-  Step 16 : Tutup popup 'I'll do this later' (span.touch)
+  Step 16 : Tutup popup 'I'll do this later'
+             EXACT: <button id="button" class="button"> (Web Component)
+             -> cari button yang teks slotnya mengandung 'later' / 'dismiss'
+             -> fallback: klik button#button.button yang muncul setelah login
   Step 17 : Klik tools button (md-icon: page_info)
   Step 18 : Pilih 'Create videos with Veo'
   Step 19 : Input prompt ke ProseMirror editor - tekan Enter
@@ -686,9 +689,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
         return True
 
     def _submit_otp(self, driver, otp: str) -> bool:
-        """
-        EXACT: input.J6L5wc, jsname="ovqh0b", name="pinInput" - opacity:0
-        """
         for sel in [
             "input.J6L5wc",
             "input[jsname='ovqh0b']",
@@ -731,24 +731,26 @@ class GeminiEnterpriseProcessor(threading.Thread):
     def _initial_setup(self, driver):
         """
         Step 16-18:
-          16. Tutup popup 'I'll do this later' -> span.touch
+          16. Tutup popup 'I'll do this later'
+              EXACT: <button id="button" class="button"> (Web Component)
+              -> Karena Web Component, teks 'I'll do this later' ada di dalam
+                 <slot> yang tidak bisa dibaca langsung lewat el.text
+              -> Strategy:
+                 1. Cari button#button.button yang muncul setelah login
+                 2. Filter: BUKAN yang punya class 'icon-button' / aria-label download
+                 3. Fallback: cari via page source innerHTML yang mengandung 'later'
           17. Klik tools button -> md-icon: page_info
           18. Pilih 'Create videos with Veo' -> div[slot='headline']
         """
-        self._log("Closing welcome popup ('I'll do this later')...")
-        try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "span.touch")))
-            el = driver.find_element(By.CSS_SELECTOR, "span.touch")
-            self._js_click(driver, el)
-            self._log("Clicked 'I'll do this later' (span.touch)")
-        except TimeoutException:
-            self._log("No welcome popup found, proceeding...", "WARNING")
-        except Exception as e:
-            self._log(f"Popup dismiss error: {e}", "WARNING")
+        self._log("Step 16: Closing 'I'll do this later' popup...")
+        dismissed = self._dismiss_later_popup(driver)
+        if dismissed:
+            self._log("Popup 'I'll do this later' dismissed.")
+        else:
+            self._log("No 'do this later' popup found, proceeding...", "WARNING")
         time.sleep(random.uniform(1, 2))
 
-        self._log("Clicking tools button (page_info icon)...")
+        self._log("Step 17: Clicking tools button (page_info icon)...")
         tools_clicked = False
         for sel in [
             "md-icon-button[aria-label*='tool' i]",
@@ -792,7 +794,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
         time.sleep(random.uniform(1, 1.5))
 
-        self._log("Selecting 'Create videos with Veo'...")
+        self._log("Step 18: Selecting 'Create videos with Veo'...")
         veo_clicked = False
         for sel in ["div[slot='headline']", "[slot='headline']"]:
             try:
@@ -835,6 +837,99 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
         time.sleep(random.uniform(1, 2))
         self._log("Initial setup completed!")
+
+    def _dismiss_later_popup(self, driver) -> bool:
+        """
+        Tutup popup 'I'll do this later' setelah login.
+
+        EXACT dari inspect:
+          <button id="button" class="button">
+            <span class="touch"></span>
+            <slot name="icon"></slot>
+            <span class="label"><slot></slot></span>
+          </button>
+
+        Karena ini Web Component dengan <slot>, teks 'I'll do this later'
+        tidak tersedia via .text / .get_attribute("textContent") biasa.
+
+        Strategy (urutan prioritas):
+          1. Cari via innerHTML page source yang mengandung 'later' / 'dismiss'
+             -> lalu cari button#button.button yang ada di sekitarnya
+          2. Tunggu button#button.button muncul -> klik yang paling baru
+             (bukan download button - tidak punya class icon-button)
+          3. Fallback: span.touch yang visible (dismiss / close)
+        """
+        # Tunggu halaman settle dulu setelah login
+        time.sleep(random.uniform(1.5, 2.5))
+
+        # Strategy 1: Cari via page source innerHTML
+        # Teks 'later' / 'dismiss' / 'skip' mungkin ada di slot content
+        try:
+            src = driver.page_source.lower()
+            keywords = ["do this later", "i'll do this later", "skip", "dismiss", "not now"]
+            if any(k in src for k in keywords):
+                self._log("Popup text detected in page source, looking for button...")
+                # Cari button#button.button yang visible dan bukan icon-button
+                for sel in [
+                    "button#button.button",
+                    "button#button",
+                    "button.button",
+                ]:
+                    try:
+                        els = driver.find_elements(By.CSS_SELECTOR, sel)
+                        for btn in els:
+                            cls  = (btn.get_attribute("class") or "").lower()
+                            aria = (btn.get_attribute("aria-label") or "").lower()
+                            # Skip tombol download (icon-button) dan tombol yang jelas bukan dismiss
+                            if "icon-button" in cls:
+                                continue
+                            if "download" in aria:
+                                continue
+                            if btn.is_displayed():
+                                self._js_click(driver, btn)
+                                self._log(f"Clicked dismiss popup: {sel} (via page source detection)")
+                                return True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # Strategy 2: Cari button#button.button yang muncul
+        # Tunggu max 8 detik
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            for sel in [
+                "button#button.button",
+                "button#button",
+                "button.button",
+            ]:
+                try:
+                    els = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for btn in els:
+                        cls  = (btn.get_attribute("class") or "").lower()
+                        aria = (btn.get_attribute("aria-label") or "").lower()
+                        if "icon-button" in cls or "download" in aria:
+                            continue
+                        if btn.is_displayed():
+                            self._js_click(driver, btn)
+                            self._log(f"Clicked dismiss popup: {sel}")
+                            return True
+                except Exception:
+                    pass
+            time.sleep(0.5)
+
+        # Strategy 3: Fallback span.touch (teks visible lama)
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, "span.touch")
+            for el in els:
+                if el.is_displayed():
+                    self._js_click(driver, el)
+                    self._log("Clicked span.touch (fallback dismiss)")
+                    return True
+        except Exception:
+            pass
+
+        return False
 
     # ── Process single prompt ───────────────────────────────────────────
     def _process_prompt(
@@ -891,9 +986,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
         return self._wait_for_generation(driver, prompt_num)
 
     def _wait_for_generation(self, driver, prompt_num: int) -> str:
-        """
-        Tunggu div.thinking-message hilang, deteksi rate limit, tunggu video render.
-        """
         thinking_appeared = False
         thinking_start    = None
         for _ in range(10):
@@ -939,7 +1031,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
                     self._log("Rate limit message on page")
                     return "rate_limit"
 
-                # EXACT dari inspect: button#button[aria-label="Download video file"]
                 dl_btns = driver.find_elements(
                     By.CSS_SELECTOR,
                     "button#button[aria-label='Download video file']"
@@ -947,7 +1038,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 if dl_btns and any(b.is_displayed() for b in dl_btns):
                     break
 
-                # Fallback selector
                 dl_btns = driver.find_elements(
                     By.CSS_SELECTOR,
                     "button[aria-label*='Download' i], "
@@ -981,13 +1071,10 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
         21b: Tunggu popup konfirmasi muncul, lalu klik tombol konfirmasi
              EXACT: <button id="button" class="button"> (di dalam popup/dialog)
-                    -> Ini Web Component, tidak punya text di DOM biasa
-                    -> Cari via parent container (popup/dialog) yang muncul setelah klik
         """
         self._log("Step 21a: Clicking download button...")
         dl_btn = None
 
-        # Selector EXACT dari inspect: button#button[aria-label="Download video file"]
         for sel in [
             "button#button[aria-label='Download video file']",
             "button[aria-label='Download video file']",
@@ -1014,29 +1101,17 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._debug_dump(driver, "no_download_btn")
             return "error"
 
-        # Scroll ke element, pastikan visible
         driver.execute_script(
             "arguments[0].scrollIntoView({block:'center'});", dl_btn)
         time.sleep(0.5)
-
-        # Klik dengan JS (lebih reliable untuk Web Components)
         self._js_click(driver, dl_btn)
-        self._log("Download button clicked (button#button aria-label='Download video file')")
+        self._log("Download button clicked")
         time.sleep(random.uniform(1.5, 2.5))
 
-        # ──────────────────────────────────────────────────
-        # Step 21b: Tunggu popup konfirmasi -> klik button konfirmasi
-        # EXACT: <button id="button" class="button"> di dalam popup/dialog
-        # Popup ini adalah Web Component -> tidak ada text di DOM reguler
-        # Strategy:
-        #   1. Cari popup/dialog container yang muncul baru
-        #   2. Di dalam container, cari button#button.button
-        #   3. Fallback: button#button.button di seluruh halaman (yang baru muncul)
-        # ──────────────────────────────────────────────────
+        # Step 21b: Konfirmasi popup
         self._log("Step 21b: Waiting for download confirmation popup...")
         confirm_clicked = False
 
-        # Tunggu popup/dialog container muncul (max 5 detik)
         POPUP_CONTAINERS = [
             "md-dialog",
             "[role='dialog']",
@@ -1064,8 +1139,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 time.sleep(0.3)
 
         if popup_el:
-            # Cari button#button.button di dalam popup
-            # EXACT dari inspect: <button id="button" class="button">
             for sel in [
                 "button#button.button",
                 "button#button",
@@ -1081,8 +1154,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 except Exception:
                     pass
         else:
-            # Popup tidak terdeteksi via container
-            # Fallback: cari button#button.button di seluruh halaman
             self._log("Popup container not found, searching whole page...", "WARNING")
             for sel in [
                 "button#button.button",
@@ -1091,11 +1162,9 @@ class GeminiEnterpriseProcessor(threading.Thread):
             ]:
                 try:
                     els = driver.find_elements(By.CSS_SELECTOR, sel)
-                    # Ambil yang BUKAN tombol download utama (sudah diklik)
                     for btn in els:
                         aria = (btn.get_attribute("aria-label") or "").lower()
                         cls  = (btn.get_attribute("class") or "").lower()
-                        # Skip tombol download utama (icon-button filled)
                         if "icon-button" in cls or "download" in aria:
                             continue
                         if btn.is_displayed():
@@ -1109,14 +1178,10 @@ class GeminiEnterpriseProcessor(threading.Thread):
                     pass
 
         if not confirm_clicked:
-            # Popup mungkin tidak ada / langsung download
-            self._log("No confirmation popup detected - download may proceed directly", "WARNING")
+            self._log("No confirmation popup - download may proceed directly", "WARNING")
 
         time.sleep(random.uniform(1, 2))
 
-        # ──────────────────────────────────────────────────
-        # Tunggu file mp4/webm muncul di output dir
-        # ──────────────────────────────────────────────────
         self._log("Waiting for video file to appear...")
         for _ in range(120):
             time.sleep(1)
