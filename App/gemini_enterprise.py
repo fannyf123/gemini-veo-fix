@@ -12,6 +12,8 @@ Alur lengkap (EXACT selectors dari inspect element):
   Step 5  : Buka business.gemini.google di tab baru - tunggu load
   Step 6  : Input email ke input#email-input (jsname="YPqjbf")
   Step 7  : Klik button#log-in-button (Continue with email)
+             -> Jika muncul error page (couldn't sign in / disallowed / access denied)
+                navigate ulang ke GEMINI_HOME_URL dan retry submit email
   Step 8  : Tunggu halaman OTP load - kembali ke tab mailticking
   Step 9  : Reload mailticking - klik a[href*='/mail/view/'] (Gemini email)
   Step 10 : Tunggu span.verification-code muncul - baca OTP
@@ -22,8 +24,6 @@ Alur lengkap (EXACT selectors dari inspect element):
   Step 15 : Tunggu h1.title 'Signing you in...' hilang
   Step 16 : Tutup popup 'I'll do this later'
              EXACT: <button id="button" class="button"> (Web Component)
-             -> cari button yang teks slotnya mengandung 'later' / 'dismiss'
-             -> fallback: klik button#button.button yang muncul setelah login
   Step 17 : Klik tools button (md-icon: page_info)
   Step 18 : Pilih 'Create videos with Veo'
   Step 19 : Input prompt ke ProseMirror editor - tekan Enter
@@ -72,7 +72,24 @@ VIDEO_GEN_TIMEOUT     = 600
 POLLING_INTERVAL      = 8
 MAX_ACCOUNT_RETRY     = 3
 MAX_TAB_RETRY         = 3
+MAX_EMAIL_SUBMIT_RETRY = 3   # max retry jika terjadi error page setelah submit email
 RATE_LIMIT_THINKING_THRESHOLD = 5.0
+
+# Keyword yang menandakan halaman error setelah submit email
+EMAIL_SUBMIT_ERROR_KEYWORDS = [
+    "couldn't sign you in",
+    "couldn't sign in",
+    "can't sign you in",
+    "disallowed_useragent",
+    "access_denied",
+    "error 400",
+    "error 403",
+    "something went wrong",
+    "try again",
+    "sign-in is not allowed",
+    "not supported",
+    "browser not supported",
+]
 
 CHROME_PATHS = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -392,6 +409,46 @@ class GeminiEnterpriseProcessor(threading.Thread):
         except Exception:
             element.click()
 
+    def _is_error_page(self, driver) -> bool:
+        """
+        Deteksi halaman error setelah submit email:
+        - "Couldn't sign you in"
+        - "disallowed_useragent"
+        - "access_denied"
+        - Error 400 / 403
+        - Halaman stuck (tidak ada input OTP / email input)
+        """
+        try:
+            src = driver.page_source.lower()
+            url = driver.current_url.lower()
+
+            # Cek keyword error di page source
+            if any(k in src for k in EMAIL_SUBMIT_ERROR_KEYWORDS):
+                return True
+
+            # Cek URL error parameter
+            if any(k in url for k in [
+                "error=", "disallowed", "access_denied",
+                "authError", "servicerestricted"
+            ]):
+                return True
+
+        except Exception:
+            pass
+        return False
+
+    def _navigate_to_gemini_home(self, driver):
+        """Navigate ke GEMINI_HOME_URL dan tunggu halaman load."""
+        self._log(f"Navigating to {GEMINI_HOME_URL} ...")
+        try:
+            driver.get(GEMINI_HOME_URL)
+            WebDriverWait(driver, 20).until(
+                lambda d: d.current_url != "about:blank")
+        except Exception:
+            pass
+        time.sleep(random.uniform(2, 3))
+        self._log("Gemini Business page loaded.")
+
     # ── Main run ──────────────────────────────────────────────────────────
     def run(self):
         os.makedirs(self.output_dir, exist_ok=True)
@@ -490,64 +547,12 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._log("Failed to open new tab", "ERROR")
             return False
 
-        self._log("Navigating to business.gemini.google...")
-        driver.get(GEMINI_HOME_URL)
-        try:
-            WebDriverWait(driver, 20).until(
-                lambda d: d.current_url != "about:blank")
-        except Exception:
-            pass
-        time.sleep(random.uniform(2, 3))
-        self._log("Gemini Business page loaded.")
-
-        self._log("Step 3: Entering email address")
-        EMAIL_SELECTORS = [
-            "input#email-input",
-            "input[jsname='YPqjbf']",
-            "input[name='loginHint']",
-            "input[type='email']",
-            "input[type='text']",
-        ]
-        email_el = None
-        for sel in EMAIL_SELECTORS:
-            el = self._wait_for(driver, sel, timeout=15)
-            if el and el.is_displayed():
-                email_el = el
-                self._log(f"Email input found: {sel}")
-                break
-
-        if not email_el:
-            self._log("Email input not found", "ERROR")
-            self._debug_dump(driver, "no_email_input")
+        # Step 3-4: Submit email dengan retry jika terjadi error page
+        self._log("Step 3: Entering email and submitting (with error page retry)")
+        submitted = self._submit_email_with_retry(driver, email)
+        if not submitted:
+            self._log("Failed to submit email after all retries", "ERROR")
             return False
-
-        self._human_type(driver, email_el, email)
-        self._log(f"Email entered: {email}")
-        time.sleep(random.uniform(0.8, 1.5))
-
-        self._log("Step 4: Clicking 'Continue with email'")
-        submit_el = None
-        for sel in [
-            "button#log-in-button",
-            "button[aria-label='Continue with email']",
-            "button[jsname='jXw9Fb']",
-            "button[type='submit']",
-        ]:
-            try:
-                el = driver.find_element(By.CSS_SELECTOR, sel)
-                if el.is_displayed() and el.is_enabled():
-                    submit_el = el
-                    self._log(f"Submit button found: {sel}")
-                    break
-            except Exception:
-                pass
-
-        if submit_el:
-            self._human_click(driver, submit_el)
-            self._log("Clicked 'Continue with email'")
-        else:
-            email_el.send_keys(Keys.RETURN)
-            self._log("Pressed Enter to submit email")
 
         self._log("Step 5: Waiting for OTP page to load...")
         time.sleep(random.uniform(3, 5))
@@ -688,6 +693,111 @@ class GeminiEnterpriseProcessor(threading.Thread):
         self._log("Account registration and setup completed successfully!")
         return True
 
+    # ── Submit email with error page retry ───────────────────────────────
+    def _submit_email_with_retry(self, driver, email: str) -> bool:
+        """
+        Submit email ke Gemini Business dengan retry otomatis jika muncul error page.
+
+        Alur per attempt:
+          1. Navigate ke GEMINI_HOME_URL
+          2. Tunggu input email muncul
+          3. Ketik email
+          4. Klik 'Continue with email'
+          5. Tunggu 3-5 detik
+          6. Cek apakah halaman adalah error page (couldn't sign in, dll)
+             -> Jika error: log warning, navigate ulang ke GEMINI_HOME_URL, retry
+             -> Jika OK: return True
+
+        Max retry: MAX_EMAIL_SUBMIT_RETRY (default 3)
+        """
+        EMAIL_SELECTORS = [
+            "input#email-input",
+            "input[jsname='YPqjbf']",
+            "input[name='loginHint']",
+            "input[type='email']",
+            "input[type='text']",
+        ]
+        SUBMIT_SELECTORS = [
+            "button#log-in-button",
+            "button[aria-label='Continue with email']",
+            "button[jsname='jXw9Fb']",
+            "button[type='submit']",
+        ]
+
+        for attempt in range(1, MAX_EMAIL_SUBMIT_RETRY + 1):
+            self._log(
+                f"Step 3-4: Submit email attempt {attempt}/{MAX_EMAIL_SUBMIT_RETRY}")
+
+            # Navigate ke Gemini home (setiap attempt)
+            self._navigate_to_gemini_home(driver)
+
+            # Cari input email
+            email_el = None
+            for sel in EMAIL_SELECTORS:
+                el = self._wait_for(driver, sel, timeout=15)
+                if el and el.is_displayed():
+                    email_el = el
+                    self._log(f"Email input found: {sel}")
+                    break
+
+            if not email_el:
+                self._log("Email input not found", "WARNING")
+                self._debug_dump(driver, f"no_email_input_attempt{attempt}")
+                time.sleep(2)
+                continue
+
+            # Ketik email
+            self._human_type(driver, email_el, email)
+            self._log(f"Email entered: {email}")
+            time.sleep(random.uniform(0.8, 1.5))
+
+            # Klik submit
+            submit_el = None
+            for sel in SUBMIT_SELECTORS:
+                try:
+                    el = driver.find_element(By.CSS_SELECTOR, sel)
+                    if el.is_displayed() and el.is_enabled():
+                        submit_el = el
+                        self._log(f"Submit button found: {sel}")
+                        break
+                except Exception:
+                    pass
+
+            if submit_el:
+                self._human_click(driver, submit_el)
+                self._log("Clicked 'Continue with email'")
+            else:
+                email_el.send_keys(Keys.RETURN)
+                self._log("Pressed Enter to submit email")
+
+            # Tunggu halaman setelah submit
+            time.sleep(random.uniform(3, 5))
+
+            # Deteksi error page
+            if self._is_error_page(driver):
+                self._log(
+                    f"Error page detected after email submit (attempt {attempt}). "
+                    f"Navigating back to Gemini home...",
+                    "WARNING"
+                )
+                self._debug_dump(driver, f"email_submit_error_{attempt}")
+                # Jika masih ada attempt tersisa, lanjut loop
+                if attempt < MAX_EMAIL_SUBMIT_RETRY:
+                    time.sleep(random.uniform(2, 3))
+                    continue
+                else:
+                    self._log(
+                        "All email submit attempts failed due to error page", "ERROR")
+                    return False
+            else:
+                self._log(
+                    f"Email submitted successfully on attempt {attempt}, "
+                    "OTP page should be loading..."
+                )
+                return True
+
+        return False
+
     def _submit_otp(self, driver, otp: str) -> bool:
         for sel in [
             "input.J6L5wc",
@@ -732,13 +842,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
         """
         Step 16-18:
           16. Tutup popup 'I'll do this later'
-              EXACT: <button id="button" class="button"> (Web Component)
-              -> Karena Web Component, teks 'I'll do this later' ada di dalam
-                 <slot> yang tidak bisa dibaca langsung lewat el.text
-              -> Strategy:
-                 1. Cari button#button.button yang muncul setelah login
-                 2. Filter: BUKAN yang punya class 'icon-button' / aria-label download
-                 3. Fallback: cari via page source innerHTML yang mengandung 'later'
           17. Klik tools button -> md-icon: page_info
           18. Pilih 'Create videos with Veo' -> div[slot='headline']
         """
@@ -841,68 +944,39 @@ class GeminiEnterpriseProcessor(threading.Thread):
     def _dismiss_later_popup(self, driver) -> bool:
         """
         Tutup popup 'I'll do this later' setelah login.
-
-        EXACT dari inspect:
-          <button id="button" class="button">
-            <span class="touch"></span>
-            <slot name="icon"></slot>
-            <span class="label"><slot></slot></span>
-          </button>
-
-        Karena ini Web Component dengan <slot>, teks 'I'll do this later'
-        tidak tersedia via .text / .get_attribute("textContent") biasa.
-
-        Strategy (urutan prioritas):
-          1. Cari via innerHTML page source yang mengandung 'later' / 'dismiss'
-             -> lalu cari button#button.button yang ada di sekitarnya
-          2. Tunggu button#button.button muncul -> klik yang paling baru
-             (bukan download button - tidak punya class icon-button)
-          3. Fallback: span.touch yang visible (dismiss / close)
+        EXACT: <button id="button" class="button"> (Web Component dengan <slot>)
+        Strategy:
+          1. Cek page source ada keyword 'later'/'dismiss' -> klik button#button.button
+          2. Polling 8s tunggu button#button.button muncul
+          3. Fallback: span.touch
         """
-        # Tunggu halaman settle dulu setelah login
         time.sleep(random.uniform(1.5, 2.5))
 
-        # Strategy 1: Cari via page source innerHTML
-        # Teks 'later' / 'dismiss' / 'skip' mungkin ada di slot content
         try:
             src = driver.page_source.lower()
             keywords = ["do this later", "i'll do this later", "skip", "dismiss", "not now"]
             if any(k in src for k in keywords):
                 self._log("Popup text detected in page source, looking for button...")
-                # Cari button#button.button yang visible dan bukan icon-button
-                for sel in [
-                    "button#button.button",
-                    "button#button",
-                    "button.button",
-                ]:
+                for sel in ["button#button.button", "button#button", "button.button"]:
                     try:
                         els = driver.find_elements(By.CSS_SELECTOR, sel)
                         for btn in els:
                             cls  = (btn.get_attribute("class") or "").lower()
                             aria = (btn.get_attribute("aria-label") or "").lower()
-                            # Skip tombol download (icon-button) dan tombol yang jelas bukan dismiss
-                            if "icon-button" in cls:
-                                continue
-                            if "download" in aria:
+                            if "icon-button" in cls or "download" in aria:
                                 continue
                             if btn.is_displayed():
                                 self._js_click(driver, btn)
-                                self._log(f"Clicked dismiss popup: {sel} (via page source detection)")
+                                self._log(f"Clicked dismiss popup: {sel}")
                                 return True
                     except Exception:
                         pass
         except Exception:
             pass
 
-        # Strategy 2: Cari button#button.button yang muncul
-        # Tunggu max 8 detik
         deadline = time.time() + 8
         while time.time() < deadline:
-            for sel in [
-                "button#button.button",
-                "button#button",
-                "button.button",
-            ]:
+            for sel in ["button#button.button", "button#button", "button.button"]:
                 try:
                     els = driver.find_elements(By.CSS_SELECTOR, sel)
                     for btn in els:
@@ -918,7 +992,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
                     pass
             time.sleep(0.5)
 
-        # Strategy 3: Fallback span.touch (teks visible lama)
         try:
             els = driver.find_elements(By.CSS_SELECTOR, "span.touch")
             for el in els:
@@ -1062,16 +1135,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
         return self._download_video(driver, prompt_num)
 
     def _download_video(self, driver, prompt_num: int) -> str:
-        """
-        Step 21 - Download video:
-
-        21a: Klik tombol download utama
-             EXACT: <button id="button" class="icon-button filled"
-                           aria-label="Download video file">
-
-        21b: Tunggu popup konfirmasi muncul, lalu klik tombol konfirmasi
-             EXACT: <button id="button" class="button"> (di dalam popup/dialog)
-        """
         self._log("Step 21a: Clicking download button...")
         dl_btn = None
 
@@ -1108,7 +1171,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
         self._log("Download button clicked")
         time.sleep(random.uniform(1.5, 2.5))
 
-        # Step 21b: Konfirmasi popup
         self._log("Step 21b: Waiting for download confirmation popup...")
         confirm_clicked = False
 
@@ -1139,11 +1201,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 time.sleep(0.3)
 
         if popup_el:
-            for sel in [
-                "button#button.button",
-                "button#button",
-                "button.button",
-            ]:
+            for sel in ["button#button.button", "button#button", "button.button"]:
                 try:
                     btn = popup_el.find_element(By.CSS_SELECTOR, sel)
                     if btn.is_displayed():
@@ -1155,11 +1213,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
                     pass
         else:
             self._log("Popup container not found, searching whole page...", "WARNING")
-            for sel in [
-                "button#button.button",
-                "button#button",
-                "button.button",
-            ]:
+            for sel in ["button#button.button", "button#button", "button.button"]:
                 try:
                     els = driver.find_elements(By.CSS_SELECTOR, sel)
                     for btn in els:
