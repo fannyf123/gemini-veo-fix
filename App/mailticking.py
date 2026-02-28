@@ -3,12 +3,13 @@ mailticking.py
 
 Otomasi mendapatkan temp email dari mailticking.com via Selenium.
 Alur:
-  1. Buka mailticking.com di tab yang sudah ada
-  2. Uncheck Gmail format checkboxes
-  3. Klik Change → dapat email random (domain non-gmail)
-  4. Klik Activate
-  5. Poll inbox untuk cari email verifikasi
-  6. Buka email → masuk iframe → ekstrak kode OTP
+  1. Buka mailticking.com di tab baru
+  2. Dismiss modal/popup jika ada (sering muncul saat load)
+  3. Uncheck Gmail format checkboxes
+  4. Klik Change → dapat email random (domain non-gmail)
+  5. Klik Activate
+  6. Poll inbox untuk cari email verifikasi
+  7. Buka email → masuk iframe → ekstrak kode OTP
 """
 import re
 import time
@@ -19,14 +20,16 @@ try:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
-    from selenium.common.exceptions import TimeoutException, NoSuchElementException
+    from selenium.common.exceptions import (
+        TimeoutException, NoSuchElementException,
+        ElementClickInterceptedException, ElementNotInteractableException
+    )
     from bs4 import BeautifulSoup
 except ImportError:
     pass
 
 MAILTICKING_URL = "https://mailticking.com"
 
-# Warna/style blok OTP di email Gemini
 OTP_BG_COLORS   = {"#eaf2ff", "#e8f0fe", "#f1f8ff", "#e3f2fd", "#f0f4ff", "#dce8fc"}
 OTP_TEXT_COLORS = {
     "#1c3a70", "#1a73e8", "#4285f4", "#1558d6", "#1967d2",
@@ -35,47 +38,40 @@ OTP_TEXT_COLORS = {
 
 
 def _extract_otp_from_html(html: str) -> Optional[str]:
-    """Parse HTML email, cari blok OTP berdasarkan style (font besar / warna / bg)."""
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
         return None
 
-    def _normalize(s: str) -> str:
+    def _n(s):
         return s.lower().replace(" ", "").strip()
 
     def _is_otp_tag(tag) -> bool:
-        style = _normalize(tag.get("style", "") or "")
+        style = _n(tag.get("style", "") or "")
         if not style:
             return False
-        # font-size >= 20px
         m = re.search(r'font-size:([\d.]+)(px|pt)', style)
         if m:
             val = float(m.group(1))
             px  = val if m.group(2) == "px" else val * 1.333
             if px >= 20:
                 return True
-        # warna text OTP
         for c in OTP_TEXT_COLORS:
-            if _normalize(c) in style:
+            if _n(c) in style:
                 return True
-        # background OTP
         for c in OTP_BG_COLORS:
-            if _normalize(c) in style:
+            if _n(c) in style:
                 return True
-        # letter-spacing + bold
         if "letter-spacing" in style and "font-weight:bold" in style:
             return True
         return False
 
-    # Strategi 1: elemen dengan OTP style
     for tag in soup.find_all(True):
         if _is_otp_tag(tag):
             text = re.sub(r'\s+', '', tag.get_text(strip=True))
             if re.fullmatch(r'[A-Z0-9]{4,8}', text, re.IGNORECASE):
                 return text.upper()
 
-    # Strategi 2: elemen standalone hanya berisi kode
     STANDALONE = ["td", "div", "span", "p", "b", "strong", "h1", "h2", "h3"]
     SKIP_WORDS = {
         "THIS", "THAT", "FROM", "WITH", "YOUR", "EMAIL", "ALIAS",
@@ -89,7 +85,6 @@ def _extract_otp_from_html(html: str) -> Optional[str]:
             if code not in SKIP_WORDS:
                 return code
 
-    # Strategi 3: regex eksplisit di plain text
     plain = soup.get_text(separator=" ")
     patterns = [
         r'(?:verification|one-time)\s+code[^A-Z0-9]{0,20}([A-Z0-9]{4,8})\b',
@@ -98,7 +93,7 @@ def _extract_otp_from_html(html: str) -> Optional[str]:
         r'\b([0-9]{4,8})\b',
     ]
     FALSE_YEARS = {str(y) for y in range(2018, 2032)}
-    FOOTER_CTX  = ["copyright", "©", "google llc", "mountain view", "privacy", "terms"]
+    FOOTER_CTX  = ["copyright", "\u00a9", "google llc", "mountain view", "privacy", "terms"]
     for pat in patterns:
         for m in re.finditer(pat, plain, re.IGNORECASE):
             code = m.group(1).upper()
@@ -114,10 +109,6 @@ def _extract_otp_from_html(html: str) -> Optional[str]:
 
 
 class MailtickingClient:
-    """
-    Mengelola interaksi dengan mailticking.com di tab browser yang sudah ada.
-    Semua method menerima driver Selenium yang aktif.
-    """
 
     def __init__(self, log_callback: Optional[Callable] = None):
         self._log_cb = log_callback
@@ -126,156 +117,271 @@ class MailtickingClient:
         if self._log_cb:
             self._log_cb(msg, level)
 
-    def _wait(self, driver, css: str, timeout: int = 15):
+    def _safe_click(self, driver, element):
+        """
+        Klik elemen dengan 3 fallback:
+          1. click() biasa
+          2. scroll into view + click()
+          3. JavaScript click (bypass overlay)
+        """
         try:
-            return WebDriverWait(driver, timeout).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, css))
-            )
-        except TimeoutException:
-            return None
-
-    def _wait_visible(self, driver, css: str, timeout: int = 15):
+            element.click()
+            return
+        except (ElementClickInterceptedException, ElementNotInteractableException):
+            pass
         try:
-            return WebDriverWait(driver, timeout).until(
-                EC.visibility_of_element_located((By.CSS_SELECTOR, css))
-            )
-        except TimeoutException:
-            return None
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+            time.sleep(0.4)
+            element.click()
+            return
+        except (ElementClickInterceptedException, ElementNotInteractableException):
+            pass
+        # JS click terakhir — selalu lolos overlay/modal
+        driver.execute_script("arguments[0].click();", element)
 
-    # ── Setup tab ──────────────────────────────────────────────────────
+    def _dismiss_modals(self, driver):
+        """
+        Tutup semua modal / popup / overlay yang mungkin muncul di mailticking.
+        Coba:
+          - Klik tombol X / close / dismiss di modal
+          - Tekan Escape
+          - Klik backdrop modal via JS
+        """
+        # Selector tombol close modal yang umum
+        CLOSE_SELECTORS = [
+            ".modal .close",
+            ".modal-header .close",
+            ".modal button.close",
+            "button[data-dismiss='modal']",
+            "[aria-label='Close']",
+            ".modal-footer button",
+            ".modal .btn",
+        ]
+        dismissed = False
+        for sel in CLOSE_SELECTORS:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                for el in els:
+                    if el.is_displayed():
+                        driver.execute_script("arguments[0].click();", el)
+                        dismissed = True
+                        time.sleep(0.5)
+                        break
+            except Exception:
+                pass
+            if dismissed:
+                break
+
+        # Escape key fallback
+        try:
+            from selenium.webdriver.common.keys import Keys
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+            time.sleep(0.4)
+        except Exception:
+            pass
+
+        # Klik backdrop via JS jika masih ada
+        try:
+            driver.execute_script(
+                "var m = document.querySelector('.modal-backdrop');"
+                "if(m){ m.style.display='none'; }"
+                "var ms = document.querySelectorAll('.modal.show,.modal.in');"
+                "ms.forEach(function(x){ x.style.display='none'; x.classList.remove('show','in'); });"
+                "document.body.classList.remove('modal-open');"
+                "document.body.style.overflow='';"
+            )
+        except Exception:
+            pass
+
+        if dismissed:
+            self._log("Modal dismissed.")
+
     def open_mailticking_tab(self, driver) -> str:
-        """
-        Buka mailticking.com di tab baru, return handle tab.
-        Driver tetap fokus ke tab baru ini.
-        """
         self._log("Opening mailticking.com...")
         driver.execute_script("window.open('about:blank', '_blank');")
         time.sleep(0.5)
         driver.switch_to.window(driver.window_handles[-1])
         driver.get(MAILTICKING_URL)
-        self._wait(driver, "body", timeout=10)
-        time.sleep(random.uniform(2.5, 4))
+        try:
+            WebDriverWait(driver, 12).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+        except Exception:
+            pass
+        time.sleep(random.uniform(3, 4.5))
+        # Dismiss modal yang sering muncul saat load pertama
+        self._dismiss_modals(driver)
+        time.sleep(0.5)
         self._log("mailticking.com loaded.")
         return driver.current_window_handle
 
     def get_fresh_email(self, driver) -> str:
-        """
-        Di tab mailticking yang sudah terbuka:
-          1. Uncheck Gmail format checkboxes
-          2. Klik Change untuk dapat email baru (non-gmail)
-          3. Klik Activate
-        Return: alamat email baru
-        """
-        # Uncheck Gmail format checkboxes
-        try:
-            checkboxes = driver.find_elements(By.CSS_SELECTOR,
-                "input[type='checkbox']")
-            unchecked = 0
-            for cb in checkboxes:
-                label = ""
-                try:
-                    label = driver.find_element(
-                        By.XPATH, f"//label[@for='{cb.get_attribute('id')}']"
-                    ).text.lower()
-                except Exception:
-                    pass
-                if cb.is_selected() and ("gmail" in label or "google" in label or label == ""):
-                    cb.click()
-                    unchecked += 1
-                    time.sleep(0.3)
-            if unchecked:
-                self._log(f"Gmail format checkboxes unchecked")
-        except Exception:
-            pass
+        # Pastikan tidak ada modal yang tersisa
+        self._dismiss_modals(driver)
+        time.sleep(0.3)
 
-        # Baca email saat ini
-        try:
-            current_el = driver.find_element(By.CSS_SELECTOR,
-                "#email, input[id*='email'], .email-display, [class*='email']")
-            current_email = current_el.get_attribute("value") or current_el.text
-            self._log(f"Current email: {current_email}")
-        except Exception:
-            pass
-
-        # Klik Change
-        change_clicked = False
+        # ─ Baca email saat ini ──────────────────────────────────────────
+        current_email = ""
         for sel in [
-            "button[onclick*='change']", "button[id*='change']",
-            "a[onclick*='change']", "#change-btn", ".change-btn",
-            "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'change')]",
-            "//a[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'change')]",
+            "#email", "input[id*='email']",
+            ".email-display", "[class*='email']",
+            "input[readonly]", "input[type='text']",
         ]:
             try:
-                if sel.startswith("//"):
-                    el = driver.find_element(By.XPATH, sel)
-                else:
-                    el = driver.find_element(By.CSS_SELECTOR, sel)
-                el.click()
-                change_clicked = True
-                self._log("Clicked Change button...")
-                break
+                el  = driver.find_element(By.CSS_SELECTOR, sel)
+                val = el.get_attribute("value") or el.text or ""
+                if "@" in val:
+                    current_email = val.strip()
+                    break
+            except Exception:
+                pass
+        self._log(f"Current email: {current_email}")
+
+        # ─ Uncheck Gmail checkboxes ────────────────────────────────────
+        try:
+            for cb in driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']"):
+                if cb.is_selected():
+                    label_txt = ""
+                    try:
+                        cb_id = cb.get_attribute("id")
+                        if cb_id:
+                            label_txt = driver.find_element(
+                                By.XPATH, f"//label[@for='{cb_id}']"
+                            ).text.lower()
+                    except Exception:
+                        pass
+                    if "gmail" in label_txt or "google" in label_txt or not label_txt:
+                        self._safe_click(driver, cb)
+                        time.sleep(0.3)
+            self._log("Gmail format checkboxes unchecked")
+        except Exception:
+            pass
+
+        # ─ Klik Change button ───────────────────────────────────────
+        change_clicked = False
+
+        # Coba selector CSS/XPATH spesifik dulu
+        CHANGE_CSS = [
+            "button.dropdown-toggle",
+            ".input-group-btn button",
+            "button[data-toggle='dropdown']",
+            "button[onclick*='change']",
+            "button[id*='change']",
+            "#change-btn", ".change-btn",
+        ]
+        for sel in CHANGE_CSS:
+            try:
+                el = driver.find_element(By.CSS_SELECTOR, sel)
+                if el.is_displayed():
+                    self._safe_click(driver, el)
+                    change_clicked = True
+                    self._log("Clicked Change button...")
+                    break
             except Exception:
                 pass
 
         if not change_clicked:
-            # Fallback: cari tombol teks "change"
+            # Fallback: cari semua button, filter teks "change"
             for btn in driver.find_elements(By.TAG_NAME, "button"):
-                if "change" in btn.text.lower():
-                    btn.click()
-                    change_clicked = True
-                    self._log("Clicked Change button...")
-                    break
+                try:
+                    if "change" in btn.text.lower() and btn.is_displayed():
+                        self._safe_click(driver, btn)
+                        change_clicked = True
+                        self._log("Clicked Change button...")
+                        break
+                except Exception:
+                    pass
 
         time.sleep(random.uniform(1.5, 2.5))
+        # Dismiss modal yang mungkin muncul setelah klik Change
+        self._dismiss_modals(driver)
+        time.sleep(0.5)
 
-        # Baca email baru
+        # ─ Baca email baru dari dropdown list ────────────────────────────
+        # mailticking menampilkan daftar domain di dropdown setelah klik Change
         new_email = ""
+
+        # Coba klik item pertama di dropdown yang terbuka
+        DROPDOWN_ITEM_SELECTORS = [
+            ".dropdown-menu li a",
+            ".dropdown-menu li",
+            ".dropdown-menu .domain-option",
+            "ul.dropdown-menu li",
+        ]
+        for sel in DROPDOWN_ITEM_SELECTORS:
+            try:
+                items = driver.find_elements(By.CSS_SELECTOR, sel)
+                if items:
+                    # Ambil item pertama yang bukan gmail
+                    for item in items:
+                        txt = item.text.lower()
+                        if txt and "gmail" not in txt and "google" not in txt:
+                            self._safe_click(driver, item)
+                            self._log(f"Selected domain: {item.text.strip()}")
+                            time.sleep(random.uniform(1, 1.5))
+                            break
+                    break
+            except Exception:
+                pass
+
+        time.sleep(random.uniform(1, 1.5))
+
+        # Baca email yang sekarang aktif
         for sel in [
             "#email", "input[id*='email']", ".email-address",
             "[class*='email-display']", "[data-email]",
+            "input[readonly]", "input[type='text']",
         ]:
             try:
-                el = driver.find_element(By.CSS_SELECTOR, sel)
-                val = el.get_attribute("value") or el.get_attribute("data-email") or el.text
-                if val and "@" in val:
+                el  = driver.find_element(By.CSS_SELECTOR, sel)
+                val = el.get_attribute("value") or el.get_attribute("data-email") or el.text or ""
+                if "@" in val:
                     new_email = val.strip()
                     break
             except Exception:
                 pass
 
         if not new_email:
-            # Fallback: cari semua elemen yang mengandung @
+            # Fallback regex di page source
             src = driver.page_source
-            m = re.search(r'([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})', src)
+            m = re.search(
+                r'([a-zA-Z0-9._%+\-]+'
+                r'@(?!gmail\.com|googlemail\.com)'
+                r'[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})',
+                src
+            )
             if m:
                 new_email = m.group(1)
 
         self._log(f"New email obtained: {new_email}")
 
-        # Klik Activate
+        # ─ Klik Activate ───────────────────────────────────────────────
         activate_clicked = False
-        for sel in [
-            "button[onclick*='activat']", "button[id*='activat']",
+        ACTIVATE_CSS = [
+            "button[onclick*='activat']",
+            "button[id*='activat']",
             "#activate-btn", ".activate-btn",
-            "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'activat')]",
-        ]:
+            "button.btn-success", "button.btn-primary",
+        ]
+        for sel in ACTIVATE_CSS:
             try:
-                if sel.startswith("//"):
-                    el = driver.find_element(By.XPATH, sel)
-                else:
-                    el = driver.find_element(By.CSS_SELECTOR, sel)
-                el.click()
-                activate_clicked = True
-                break
+                el = driver.find_element(By.CSS_SELECTOR, sel)
+                if el.is_displayed():
+                    self._safe_click(driver, el)
+                    activate_clicked = True
+                    break
             except Exception:
                 pass
 
         if not activate_clicked:
             for btn in driver.find_elements(By.TAG_NAME, "button"):
-                if "activat" in btn.text.lower():
-                    btn.click()
-                    activate_clicked = True
-                    break
+                try:
+                    if "activat" in btn.text.lower() and btn.is_displayed():
+                        self._safe_click(driver, btn)
+                        activate_clicked = True
+                        break
+                except Exception:
+                    pass
 
         if activate_clicked:
             self._log("Clicked Activate button...")
@@ -292,14 +398,10 @@ class MailtickingClient:
     def wait_for_verification_email(
         self,
         driver,
-        mail_tab_handle: str,
+        mail_tab_handle:   str,
         gemini_tab_handle: str,
-        timeout: int = 90,
+        timeout:           int = 90,
     ) -> bool:
-        """
-        Switch ke tab mailticking, poll inbox sampai email verifikasi Gemini muncul.
-        Return True jika ditemukan.
-        """
         self._log("Checking inbox for verification email...")
         driver.switch_to.window(mail_tab_handle)
         self._log("Switched to mailticking.com tab")
@@ -307,11 +409,10 @@ class MailtickingClient:
         start = time.time()
         while time.time() - start < timeout:
             try:
-                # Refresh inbox
                 driver.refresh()
                 time.sleep(random.uniform(2, 3))
+                self._dismiss_modals(driver)  # modal bisa muncul lagi setelah refresh
 
-                # Cari email dari Google / Gemini
                 rows = driver.find_elements(By.CSS_SELECTOR,
                     ".mail-item, .inbox-item, tr[onclick], "
                     "[class*='email-row'], [class*='message-row'], "
@@ -329,7 +430,7 @@ class MailtickingClient:
                 pass
 
             elapsed = int(time.time() - start)
-            if elapsed % 10 == 0:
+            if elapsed > 0 and elapsed % 10 < 3:
                 self._log(f"Waiting for email... ({elapsed}s)")
             time.sleep(3)
 
@@ -340,11 +441,9 @@ class MailtickingClient:
         driver,
         mail_tab_handle: str,
     ) -> Optional[str]:
-        """
-        Di tab mailticking, buka email verifikasi dan ekstrak kode OTP.
-        """
         self._log("Extracting verification code from email...")
         driver.switch_to.window(mail_tab_handle)
+        self._dismiss_modals(driver)
 
         # Klik email Gemini/Google
         try:
@@ -355,7 +454,7 @@ class MailtickingClient:
             for row in rows:
                 txt = row.text.lower()
                 if any(k in txt for k in ["gemini", "google", "verification", "verify"]):
-                    row.click()
+                    self._safe_click(driver, row)
                     self._log("Opened verification email.")
                     time.sleep(random.uniform(2, 3))
                     break
@@ -363,6 +462,7 @@ class MailtickingClient:
             self._log(f"Could not click email row: {e}", "WARNING")
 
         time.sleep(random.uniform(1, 2))
+        self._dismiss_modals(driver)
 
         # Coba masuk iframe email
         html_content = ""
