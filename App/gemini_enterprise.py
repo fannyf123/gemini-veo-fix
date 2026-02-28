@@ -25,7 +25,9 @@ Alur lengkap (EXACT selectors dari inspect element):
   Step 16 : Tutup popup 'I'll do this later'
              -> Web Component Shadow DOM: pakai JS rekursif shadowRoot traversal
   Step 17 : Klik tools button (md-icon: page_info)
-             -> Web Component Shadow DOM: pakai JS rekursif shadowRoot traversal
+             -> Priority 0: exact path ucs-standalone-app > ucs-chat-landing >
+                ucs-search-bar > #tool-selector-menu-anchor > #button
+             -> Fallback: JS rekursif shadowRoot traversal
   Step 18 : Pilih 'Create videos with Veo'
   Step 19 : Input prompt ke ProseMirror editor - tekan Enter
   Step 20 : Tunggu div.thinking-message hilang - tunggu video render
@@ -194,11 +196,33 @@ _JS_LIST_BUTTONS = """
 })();
 """
 
-# JavaScript: cari tools button (md-icon-button dengan md-icon 'page_info'
-# atau aria-label/title mengandung keyword tool/gem/extension/app)
-# Traversal rekursif shadow DOM - sama seperti _JS_FIND_DISMISS_BTN
+# JavaScript: cari tools button (page_info icon) di shadow DOM
+#
+# Prioritas 0: Exact path yang diketahui dari inspect element
+#   body > ucs-standalone-app
+#     .shadowRoot > ucs-chat-landing
+#     .shadowRoot > ucs-search-bar
+#     .shadowRoot > #tool-selector-menu-anchor
+#     .shadowRoot > #button
+#
+# Fallback: Recursive shadow DOM traversal mencari:
+#   - md-icon dengan text 'page_info' -> ancestor md-icon-button/button
+#   - md-icon-button / button dengan aria-label/title mengandung
+#     'tool', 'gem', 'extension', 'plugin', 'app'
 _JS_FIND_TOOLS_BTN = """
 (function() {
+    // ── Priority 0: Exact shadow DOM path ──────────────────────────────────
+    try {
+        var btn = document
+            .querySelector("body > ucs-standalone-app").shadowRoot
+            .querySelector("div > div.ucs-standalone-outer-row-container > div > ucs-chat-landing").shadowRoot
+            .querySelector("div > div > div > div.fixed-content > ucs-search-bar").shadowRoot
+            .querySelector("#tool-selector-menu-anchor").shadowRoot
+            .querySelector("#button");
+        if (btn) return btn;
+    } catch(e) {}
+
+    // ── Fallback: Recursive shadow DOM traversal ───────────────────────────
     var ARIA_KEYWORDS = ['tool', 'gem', 'extension', 'plugin', 'app'];
 
     function hasToolAria(el) {
@@ -223,7 +247,7 @@ _JS_FIND_TOOLS_BTN = """
                     if (tag === 'md-icon-button' || tag === 'button') return parent;
                     parent = parent.parentElement;
                 }
-                return icons[k]; // fallback: return icon itu sendiri
+                return icons[k];
             }
         }
 
@@ -967,8 +991,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         self._log("Step 17: Clicking tools button (page_info icon)...")
         tools_clicked = False
 
-        # Strategy 1: JS shadow DOM traversal (primary - md-icon-button is a Web Component)
-        # find_elements() CANNOT penetrate shadow roots; JS traversal is required
+        # Strategy 1: JS shadow DOM traversal (Priority 0 = exact path, then recursive)
         try:
             btn = driver.execute_script(_JS_FIND_TOOLS_BTN)
             if btn:
