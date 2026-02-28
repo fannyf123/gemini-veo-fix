@@ -10,11 +10,6 @@ Cara pakai:
        - Generate video untuk setiap prompt
        - Auto switch akun jika rate limit
     4. Video tersimpan di OUTPUT_GEMINI/
-
-Tidak perlu:
-    - Firefox Relay API key
-    - Gmail API / credentials.json
-    - Playwright
 """
 
 import os
@@ -42,7 +37,6 @@ def load_config() -> dict:
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # Buang key lama yang sudah tidak dipakai
             for old_key in [
                 "relay_api_key", "mask_email", "fixed_mask_email",
                 "max_workers", "batch_stagger_delay",
@@ -108,17 +102,18 @@ def main():
         results["path"] = path
         done_event.set()
 
-    from App.gemini_batch import run_batch
+    from App.gemini_enterprise import GeminiEnterpriseProcessor
 
-    proc = run_batch(
+    proc = GeminiEnterpriseProcessor(
         base_dir          = _ROOT,
-        prompts_file      = PROMPTS_PATH,
+        prompts           = prompts,
         output_dir        = output_dir,
         config            = cfg,
         log_callback      = log,
         progress_callback = lambda pct, msg: print(f"[{pct:3d}%] {msg}", flush=True),
         finished_callback = on_finish,
     )
+    proc.start()
 
     done_event.wait()
 
