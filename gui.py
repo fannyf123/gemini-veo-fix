@@ -95,9 +95,18 @@ class GeminiVeoGUI(ctk.CTk):
         self.retry_entry = ctk.CTkEntry(self.delay_retry_frame, textvariable=self.retry_var, width=50)
         self.retry_entry.pack(side="left", padx=(5, 0))
 
+        # Max Workers
+        self.workers_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
+        self.workers_frame.grid(row=7, column=0, padx=20, pady=5, sticky="ew")
+
+        self.workers_var = ctk.StringVar(value="1")
+        ctk.CTkLabel(self.workers_frame, text="Max Workers:").pack(side="left")
+        self.workers_entry = ctk.CTkEntry(self.workers_frame, textvariable=self.workers_var, width=50)
+        self.workers_entry.pack(side="left", padx=(5, 0))
+
         # Switches
         self.switches_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
-        self.switches_frame.grid(row=7, column=0, padx=20, pady=15, sticky="ew")
+        self.switches_frame.grid(row=8, column=0, padx=20, pady=15, sticky="ew")
 
         self.headless_var = ctk.BooleanVar(value=True)
         self.headless_switch = ctk.CTkSwitch(self.switches_frame, text="Headless Chrome", variable=self.headless_var)
@@ -109,10 +118,10 @@ class GeminiVeoGUI(ctk.CTk):
 
         # Start / Stop buttons at bottom of sidebar
         self.start_btn = ctk.CTkButton(self.sidebar_frame, text="▶ START", fg_color="#2FA572", hover_color="#106A43", font=ctk.CTkFont(weight="bold", size=14), height=40, command=self._start)
-        self.start_btn.grid(row=9, column=0, padx=20, pady=(20, 10), sticky="ew")
+        self.start_btn.grid(row=10, column=0, padx=20, pady=(20, 10), sticky="ew")
 
         self.stop_btn = ctk.CTkButton(self.sidebar_frame, text="■ STOP", fg_color="#C23B22", hover_color="#8F2515", font=ctk.CTkFont(weight="bold", size=14), height=40, state="disabled", command=self._stop)
-        self.stop_btn.grid(row=10, column=0, padx=20, pady=(0, 20), sticky="ew")
+        self.stop_btn.grid(row=11, column=0, padx=20, pady=(0, 20), sticky="ew")
 
     def _build_main_area(self):
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -123,12 +132,15 @@ class GeminiVeoGUI(ctk.CTk):
         # Prompts Section
         self.prompt_header_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.prompt_header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
-        self.prompt_header_frame.grid_columnconfigure(1, weight=1)
+        self.prompt_header_frame.grid_columnconfigure(2, weight=1)
         
         ctk.CTkLabel(self.prompt_header_frame, text="📝 Prompts (One per line):", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w")
         
+        self.import_btn = ctk.CTkButton(self.prompt_header_frame, text="Import TXT", width=80, height=24, fg_color="#005C4B", hover_color="#00463A", command=self._import_txt)
+        self.import_btn.grid(row=0, column=1, padx=(10, 0), sticky="w")
+
         self.prompt_count_var = ctk.StringVar(value="0 prompts")
-        ctk.CTkLabel(self.prompt_header_frame, textvariable=self.prompt_count_var, text_color="gray").grid(row=0, column=1, sticky="e")
+        ctk.CTkLabel(self.prompt_header_frame, textvariable=self.prompt_count_var, text_color="gray").grid(row=0, column=2, sticky="e")
 
         self.prompts_text = ctk.CTkTextbox(self.main_frame, height=120, font=ctk.CTkFont(family="Consolas", size=12))
         self.prompts_text.grid(row=1, column=0, sticky="ew", pady=(0, 20))
@@ -182,6 +194,7 @@ class GeminiVeoGUI(ctk.CTk):
                 self.output_var.set(cfg.get("output_dir", OUTPUT_DIR))
                 self.delay_var.set(str(cfg.get("delay", 5)))
                 self.retry_var.set(str(cfg.get("retry", 1)))
+                self.workers_var.set(str(cfg.get("max_workers", 1)))
                 self.headless_var.set(cfg.get("headless", True))
                 self.stealth_var.set(cfg.get("stealth", True))
             except Exception:
@@ -193,6 +206,7 @@ class GeminiVeoGUI(ctk.CTk):
             "headless":   self.headless_var.get(),
             "delay":      int(self.delay_var.get() or 5),
             "retry":      int(self.retry_var.get() or 1),
+            "max_workers":int(self.workers_var.get() or 1),
             "stealth":    self.stealth_var.get(),
         }
         try:
@@ -234,6 +248,21 @@ class GeminiVeoGUI(ctk.CTk):
         path = filedialog.askdirectory(initialdir=self.output_var.get())
         if path:
             self.output_var.set(path)
+
+    def _import_txt(self):
+        file_path = filedialog.askopenfilename(
+            title="Select Prompts File",
+            filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")]
+        )
+        if file_path:
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.prompts_text.delete("1.0", "end")
+                self.prompts_text.insert("1.0", content.strip())
+                self._update_prompt_count()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to read file:\n{e}")
 
     def _append_log(self, msg: str, level: str = "INFO"):
         """Thread-safe log append."""
@@ -287,7 +316,7 @@ class GeminiVeoGUI(ctk.CTk):
         self._append_log(f"Starting with {len(prompts)} prompts", "SYSTEM")
         self._append_log(f"Output: {output_dir}", "SYSTEM")
         self._append_log(f"Headless: {cfg['headless']} | Stealth: {cfg['stealth']} | "
-                         f"Delay: {cfg['delay']}s | Retry: {cfg['retry']}x", "SYSTEM")
+                         f"Delay: {cfg['delay']}s | Retry: {cfg['retry']}x | Workers: {cfg.get('max_workers', 1)}", "SYSTEM")
 
         self._running = True
         self._set_running(True)

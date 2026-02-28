@@ -381,10 +381,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
         self.finished_cb    = finished_callback
         self.start_index    = start_index
         self._cancelled     = False
-        self._driver        = None
-        self._temp_profile  = None
-        self._mail_tab      = None
-        self._gemini_tab    = None
         self._mail_client   = MailtickingClient(log_callback=log_callback)
         self.debug_dir      = os.path.join(base_dir, "DEBUG")
 
@@ -416,15 +412,15 @@ class GeminiEnterpriseProcessor(threading.Thread):
         driver.execute_script("arguments[0].click();", element)
 
     # ── Driver setup ───────────────────────────────────────────────────────
-    def _create_driver(self) -> Optional[object]:
+    def _create_driver(self) -> tuple[Optional[object], Optional[str]]:
         self._log("Setting up fresh Chrome browser...")
         cd_path = _setup_chromedriver(self.base_dir, self._log)
-        self._temp_profile = tempfile.mkdtemp(prefix="gemini_profile_")
-        self._log("Using fresh browser profile")
+        temp_profile = tempfile.mkdtemp(prefix="gemini_profile_")
+        self._log(f"Using fresh browser profile: {temp_profile}")
 
         headless = self.config.get("headless", False)
         opts = Options()
-        opts.add_argument(f"--user-data-dir={self._temp_profile}")
+        opts.add_argument(f"--user-data-dir={temp_profile}")
         opts.add_argument("--no-first-run")
         opts.add_argument("--no-default-browser-check")
         opts.add_argument("--disable-blink-features=AutomationControlled")
@@ -464,20 +460,19 @@ class GeminiEnterpriseProcessor(threading.Thread):
             driver.execute_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             self._log("Chrome browser initialized")
-            return driver
+            return driver, temp_profile
         except Exception as e:
             self._log(f"Failed to create Chrome driver: {e}", "ERROR")
-            return None
+            return None, None
 
-    def _quit_driver(self, driver):
+    def _quit_driver(self, driver, temp_profile):
         try:
             if driver:
                 driver.quit()
         except Exception:
             pass
-        if self._temp_profile and os.path.exists(self._temp_profile):
-            shutil.rmtree(self._temp_profile, ignore_errors=True)
-            self._temp_profile = None
+        if temp_profile and os.path.exists(temp_profile):
+            shutil.rmtree(temp_profile, ignore_errors=True)
 
     # ── Selenium helpers ──────────────────────────────────────────────────
     def _wait_for(self, driver, css_selector, timeout=15):
@@ -567,62 +562,111 @@ class GeminiEnterpriseProcessor(threading.Thread):
     # ── Main run ─────────────────────────────────────────────────────
     def run(self):
         os.makedirs(self.output_dir, exist_ok=True)
-
-        total   = len(self.prompts)
-        delay   = int(self.config.get("delay", 5))
-        retries = int(self.config.get("retry",  1))
+        total = len(self.prompts)
+        delay = int(self.config.get("delay", 5))
+        retries = int(self.config.get("retry", 1))
+        max_workers = int(self.config.get("max_workers", 1))
 
         self._log("--- STARTING AUTOMATION ---")
-        self._log(f"Total prompts: {total}")
+        self._log(f"Total prompts: {total} | Max Workers: {max_workers}")
         self._log(f"Settings: delay {delay}s, retry {retries}x")
 
-        current_index   = self.start_index
-        re_enter_prompt = None
+        self._completed_lock = threading.Lock()
+        self._completed_count = self.start_index
+        
+        from concurrent.futures import ThreadPoolExecutor
+        import math
 
-        while current_index < total and not self._cancelled:
-            driver = self._create_driver()
+        todos = self.prompts[self.start_index:]
+        if not todos:
+            self._done(True, "All prompts already processed.")
+            return
+
+        # Chunk the prompts evenly based on number of workers
+        if max_workers <= 1:
+            chunks = [todos]
+        else:
+            chunk_size = math.ceil(len(todos) / max_workers)
+            chunks = [todos[i:i + chunk_size] for i in range(0, len(todos), chunk_size)]
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            curr_global_idx = self.start_index
+            for w_idx, chunk in enumerate(chunks, 1):
+                futures.append(executor.submit(self._worker_run, w_idx, chunk, curr_global_idx, total))
+                curr_global_idx += len(chunk)
+
+            # Wait for all workers to finish
+            for f in futures:
+                try:
+                    f.result()
+                except Exception as e:
+                    self._log(f"Worker crashed: {e}", "ERROR")
+
+        if not self._cancelled:
+            self._log("All workers finished!")
+            self._done(True, f"Done! {self._completed_count} prompts processed.")
+        else:
+            self._done(False, "Cancelled.")
+
+    def _worker_run(self, worker_id: int, chunk: list, start_global_idx: int, total_prompts: int):
+        self._log(f"[W-{worker_id}] Started processing {len(chunk)} prompts")
+        delay   = int(self.config.get("delay", 5))
+        retries = int(self.config.get("retry",  1))
+        
+        current_idx = 0
+        re_enter_prompt = None
+        
+        while current_idx < len(chunk) and not self._cancelled:
+            driver, temp_profile = self._create_driver()
             if driver is None:
-                self._done(False, "Failed to create browser.")
+                self._log(f"[W-{worker_id}] Failed to create browser.", "ERROR")
                 return
 
-            ok = self._register_account(driver)
+            ok = self._register_account(driver, worker_id)
             if not ok:
-                self._quit_driver(driver)
-                self._done(False, "Account registration failed.")
+                self._quit_driver(driver, temp_profile)
+                self._log(f"[W-{worker_id}] Account registration failed.", "ERROR")
                 return
 
             rate_limited = False
             gen_retries  = {}
 
-            while current_index < total and not self._cancelled:
-                prompt = re_enter_prompt or self.prompts[current_index]
+            while current_idx < len(chunk) and not self._cancelled:
+                prompt = re_enter_prompt or chunk[current_idx]
                 re_enter_prompt = None
-                prompt_num = current_index + 1
+                prompt_num = start_global_idx + current_idx + 1
 
-                self._log(f"--- Processing Prompt {prompt_num}/{total} ---")
+                self._log(f"[W-{worker_id}] --- Processing Prompt {prompt_num}/{total_prompts} ---")
 
-                result = self._process_prompt(driver, prompt, prompt_num, total, delay)
+                result = self._process_prompt(driver, prompt, prompt_num, total_prompts, delay)
 
                 if result == "rate_limit":
-                    self._log("Rate limit detected - switching account...")
+                    self._log(f"[W-{worker_id}] Rate limit detected - switching account...")
                     rate_limited    = True
                     re_enter_prompt = prompt
                     break
                 elif result == "ok":
-                    gen_retries.pop(current_index, None)
-                    current_index += 1
-                    if current_index < total:
+                    gen_retries.pop(current_idx, None)
+                    current_idx += 1
+                    
+                    # Update global progress safely
+                    with self._completed_lock:
+                        self._completed_count += 1
+                        pct = int((self._completed_count / total_prompts) * 100)
+                        self._progress(pct, f"Processed {self._completed_count}/{total_prompts} prompts")
+                    
+                    if current_idx < len(chunk):
                         time.sleep(delay)
                 else:
-                    count = gen_retries.get(current_index, 0) + 1
-                    gen_retries[current_index] = count
+                    count = gen_retries.get(current_idx, 0) + 1
+                    gen_retries[current_idx] = count
                     if count < retries:
                         self._log(
-                            f"Prompt {prompt_num} failed (attempt {count}/{retries}), "
+                            f"[W-{worker_id}] Prompt {prompt_num} failed (attempt {count}/{retries}), "
                             f"retrying after {delay}s...", "WARNING"
                         )
                         time.sleep(delay)
-                        # Navigate back to fresh Gemini page for retry
                         try:
                             driver.get(GEMINI_HOME_URL)
                             time.sleep(random.uniform(3, 5))
@@ -631,34 +675,30 @@ class GeminiEnterpriseProcessor(threading.Thread):
                             pass
                         re_enter_prompt = prompt
                     else:
-                        self._log(f"Skipping prompt {prompt_num} after {count} failed attempts", "WARNING")
-                        gen_retries.pop(current_index, None)
-                        current_index += 1
+                        self._log(f"[W-{worker_id}] Skipping prompt {prompt_num} after {count} failed attempts", "WARNING")
+                        gen_retries.pop(current_idx, None)
+                        current_idx += 1
+                        with self._completed_lock:
+                            self._completed_count += 1
 
-            self._quit_driver(driver)
+            self._quit_driver(driver, temp_profile)
             if rate_limited:
                 time.sleep(5)
 
-        if not self._cancelled:
-            self._log("All prompts processed!")
-            self._done(True, f"Done! {current_index} prompts processed.")
-        else:
-            self._done(False, "Cancelled.")
-
     # ── Account registration ──────────────────────────────────────────────
-    def _register_account(self, driver) -> bool:
+    def _register_account(self, driver, worker_id=0) -> bool:
         for retry in range(1, MAX_ACCOUNT_RETRY + 1):
-            self._log(f"--- ACCOUNT REGISTRATION (Attempt {retry}/{MAX_ACCOUNT_RETRY}) ---")
-            ok = self._register_once(driver)
+            self._log(f"[W-{worker_id}] --- ACCOUNT REGISTRATION (Attempt {retry}/{MAX_ACCOUNT_RETRY}) ---")
+            ok = self._register_once(driver, worker_id)
             if ok:
                 return True
-            self._log(f"Attempt {retry} failed, retrying...", "WARNING")
+            self._log(f"[W-{worker_id}] Attempt {retry} failed, retrying...", "WARNING")
             time.sleep(3)
         return False
 
-    def _register_once(self, driver) -> bool:
-        self._log("Step 1: Getting fresh temp email from mailticking.com")
-        self._mail_tab = self._mail_client.open_mailticking_tab(driver)
+    def _register_once(self, driver, worker_id=0) -> bool:
+        self._log(f"[W-{worker_id}] Step 1: Getting fresh temp email from mailticking.com")
+        mail_tab = self._mail_client.open_mailticking_tab(driver)
         email = self._mail_client.get_fresh_email(driver)
         if not email or "@" not in email:
             self._log("Failed to get temp email", "ERROR")
@@ -672,7 +712,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 time.sleep(1)
                 if len(driver.window_handles) > 1:
                     driver.switch_to.window(driver.window_handles[-1])
-                    self._gemini_tab = driver.current_window_handle
+                    gemini_tab = driver.current_window_handle
                     break
                 raise Exception("Tab not opened")
             except Exception:
@@ -724,8 +764,8 @@ class GeminiEnterpriseProcessor(threading.Thread):
         try:
             found = self._mail_client.wait_for_verification_email(
                 driver,
-                mail_tab_handle   = self._mail_tab,
-                gemini_tab_handle = self._gemini_tab,
+                mail_tab_handle   = mail_tab,
+                gemini_tab_handle = gemini_tab,
                 timeout           = OTP_TIMEOUT,
             )
         except Exception as e:
@@ -742,7 +782,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
             try:
                 otp = self._mail_client.extract_verification_code(
                     driver,
-                    mail_tab_handle = self._mail_tab,
+                    mail_tab_handle = mail_tab,
                 )
                 if otp:
                     break
@@ -759,7 +799,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         # Step 8: Enter OTP with retry
         self._log("Step 8: Entering OTP on Gemini")
         try:
-            driver.switch_to.window(self._gemini_tab)
+            driver.switch_to.window(gemini_tab)
         except Exception as e:
             self._log(f"Failed to switch to Gemini tab: {e}", "ERROR")
             return False
