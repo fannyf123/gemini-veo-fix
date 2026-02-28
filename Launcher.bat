@@ -13,20 +13,10 @@ echo.
 echo [INFO] Menginstall dependencies...
 pip install -r requirements.txt
 if errorlevel 1 (
-    echo [ERROR] pip install requirements.txt gagal!
+    echo [ERROR] pip install gagal!
+    echo         Pastikan Python dan pip sudah terinstall.
     pause
     exit /b 1
-)
-
-echo.
-echo [INFO] Install Playwright Chromium...
-playwright install chromium
-
-echo.
-echo [INFO] Verifikasi stealth terinstall...
-python -c "from App._stealth_compat import apply_stealth; print('[OK]  playwright-stealth OK')" 2>nul
-if errorlevel 1 (
-    echo [WRN] stealth compat check gagal, lanjut saja...
 )
 
 echo.
