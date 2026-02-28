@@ -10,30 +10,26 @@ Alur lengkap (EXACT selectors dari inspect element):
   Step 3  : Loop klik Change sampai email bukan @gmail/@googlemail
   Step 4  : Centang HANYA id="type4" (abc@domain.com) -> Activate
   Step 5  : Buka business.gemini.google di tab baru - tunggu load
-  Step 6  : Input email ke input#email-input (jsname="YPqjbf")
-  Step 7  : Klik button#log-in-button (Continue with email)
+  Step 6  : Input email ke document.querySelector("#email-input")
+  Step 7  : Klik button document.querySelector("#log-in-button > span.UywwFc-RLmnJb")
              -> Jika muncul error page (couldn't sign in / disallowed / access denied)
                 navigate ulang ke GEMINI_HOME_URL dan retry submit email
   Step 8  : Tunggu halaman OTP load - kembali ke tab mailticking
-  Step 9  : Reload mailticking - klik a[href*='/mail/view/'] (Gemini email)
-  Step 10 : Tunggu span.verification-code muncul - baca OTP
-  Step 11 : Kembali tab Gemini - input OTP ke input.J6L5wc
-  Step 12 : Klik verify button
-  Step 13 : Tunggu form nama - input ke input[formcontrolname="fullName"]
-  Step 14 : Klik span.mdc-button__label 'Agree & get started'
+  Step 9  : Reload mailticking - klik document.querySelector("#message-list > tr.unread > td.col-6 > a")
+  Step 10 : Tunggu verification code muncul - baca document.querySelector("#content-wrapper > table > tbody > tr > td > table > tbody > tr:nth-child(1) > td > table > tbody > tr > td > p.verification-code-container > span")
+  Step 11 : Kembali tab Gemini - input OTP ke document.querySelector("#yDmH0d > c-wiz > div > div > div.keerLb > div > div > div > form > div:nth-child(1) > div > div.AFffCd > div > input")
+  Step 12 : Klik verify button document.querySelector("#yDmH0d > c-wiz > div > div > div.keerLb > div > div > div > form > div.rPlx0b > div > div:nth-child(1) > span > div.VfPpkd-dgl2Hf-ppHlrf-sM5MNb > button > span.YUhpIc-RLmnJb")
+  Step 13 : Tunggu form nama - input ke document.querySelector("#mat-input-0")
+  Step 14 : Klik document.querySelector("body > saasfe-root > main > saasfe-onboard-component > div > div > div > form > button > span.mat-mdc-button-touch-target")
   Step 15 : Tunggu h1.title 'Signing you in...' hilang
-  Step 16 : Tutup popup 'I'll do this later'
-             -> Web Component Shadow DOM: pakai JS rekursif shadowRoot traversal
-  Step 17 : Klik tools button (md-icon: page_info)
-             -> Priority 0: exact path ucs-standalone-app > ucs-chat-landing >
-                ucs-search-bar > #tool-selector-menu-anchor > #button
-             -> Fallback: JS rekursif shadowRoot traversal
-  Step 18 : Pilih 'Create videos with Veo'
-  Step 19 : Input prompt ke ProseMirror editor - tekan Enter
-  Step 20 : Tunggu div.thinking-message hilang - tunggu video render
+  Step 16 : Tutup popup dengan shadow DOM path
+  Step 17 : Klik tools button dengan shadow DOM path
+  Step 18 : Pilih 'Create videos with Veo' dengan shadow DOM path
+  Step 19 : Input prompt ke ProseMirror editor dengan shadow DOM path - tekan Enter
+  Step 20 : Tunggu thinking-message hilang - tunggu video render
   Step 21 : Download video
-    21a: Klik button#button[aria-label="Download video file"]
-    21b: Tunggu popup konfirmasi muncul -> klik button#button.button
+    21a: Klik button download dengan shadow DOM path
+    21b: Tunggu popup konfirmasi muncul -> klik button konfirmasi dengan shadow DOM path
 """
 import os
 import re
@@ -93,83 +89,76 @@ EMAIL_SUBMIT_ERROR_KEYWORDS = [
     "browser not supported",
 ]
 
-# JavaScript: rekursif traversal semua shadow root untuk cari button 'I'll do this later'
-# Mencari button yang:
-#   - id="button" atau class mengandung "button"
-#   - BUKAN icon-button / download button
-#   - Teks di dalam shadow slot mengandung 'later' / 'skip' / 'dismiss' / 'not now'
-#   - Atau: parent custom element mengandung teks tersebut di outerHTML
-_JS_FIND_DISMISS_BTN = """
-(function() {
-    var KEYWORDS = ['later', 'skip', 'dismiss', 'not now', 'no thanks'];
-    var SKIP_ARIA = ['download', 'close', 'menu', 'search'];
-
-    function textOf(el) {
-        // Gabungkan innerText + semua slot children innerText
-        var t = (el.innerText || el.textContent || '').toLowerCase().trim();
-        if (!t && el.shadowRoot) {
-            var slots = el.shadowRoot.querySelectorAll('slot');
-            slots.forEach(function(slot) {
-                var assigned = slot.assignedNodes ? slot.assignedNodes({flatten:true}) : [];
-                assigned.forEach(function(node) {
-                    t += (node.textContent || '').toLowerCase();
-                });
-            });
-        }
-        return t;
-    }
-
-    function hasKeyword(txt) {
-        return KEYWORDS.some(function(k) { return txt.indexOf(k) !== -1; });
-    }
-
-    function isSkip(el) {
-        var aria = (el.getAttribute('aria-label') || '').toLowerCase();
-        var cls  = (el.getAttribute('class') || '').toLowerCase();
-        return SKIP_ARIA.some(function(k) { return aria.indexOf(k) !== -1; })
-            || cls.indexOf('icon-button') !== -1;
-    }
-
-    function findInRoot(root) {
-        // Cari semua button candidate
-        var candidates = root.querySelectorAll(
-            'button#button, button.button, [id="button"], gds-button, gmp-button'
-        );
-        for (var i = 0; i < candidates.length; i++) {
-            var el = candidates[i];
-            if (isSkip(el)) continue;
-
-            // Cek teks el itu sendiri
-            var t = textOf(el);
-            if (hasKeyword(t)) return el;
-
-            // Cek outerHTML parent custom element (bisa jadi teks ada di light DOM)
-            var parent = el.parentElement;
-            while (parent && parent !== document.body) {
-                var pt = (parent.outerHTML || '').toLowerCase();
-                if (hasKeyword(pt) && !isSkip(el)) return el;
-                // Hanya naik 3 level
-                if (parent.parentElement === parent) break;
-                parent = parent.parentElement;
-            }
-        }
-
-        // Rekursif ke shadow roots
-        var all = root.querySelectorAll('*');
-        for (var j = 0; j < all.length; j++) {
-            if (all[j].shadowRoot) {
-                var found = findInRoot(all[j].shadowRoot);
-                if (found) return found;
-            }
-        }
-        return null;
-    }
-
-    return findInRoot(document);
-})();
+# JavaScript: Step 16 - Dismiss popup 'I'll do this later'
+_JS_DISMISS_POPUP = """
+return document.querySelector("body > ucs-standalone-app").shadowRoot
+    .querySelector("ucs-welcome-dialog").shadowRoot
+    .querySelector("div > md-dialog > div:nth-child(3) > md-text-button").shadowRoot
+    .querySelector("#button > span.touch");
 """
 
-# JavaScript: cari semua button di shadow DOM, kembalikan array info
+# JavaScript: Step 17 - Click tools button
+_JS_CLICK_TOOLS = """
+return document.querySelector("body > ucs-standalone-app").shadowRoot
+    .querySelector("div > div.ucs-standalone-outer-row-container > div > ucs-chat-landing").shadowRoot
+    .querySelector("div > div > div > div.fixed-content > ucs-search-bar").shadowRoot
+    .querySelector("#tool-selector-menu-anchor").shadowRoot
+    .querySelector("#button > span.touch");
+"""
+
+# JavaScript: Step 18 - Click 'Create videos with Veo'
+_JS_CLICK_VEO = """
+return document.querySelector("body > ucs-standalone-app").shadowRoot
+    .querySelector("div > div.ucs-standalone-outer-row-container > div > ucs-chat-landing").shadowRoot
+    .querySelector("div > div > div > div.fixed-content > ucs-search-bar").shadowRoot
+    .querySelector("div > form > div > div.actions-buttons.omnibar.multiline-input-actions-buttons > div.tools-button-container > md-menu > div:nth-child(7) > md-menu-item > div");
+"""
+
+# JavaScript: Step 19 - Get prompt input element
+_JS_GET_PROMPT_INPUT = """
+return document.querySelector("body > ucs-standalone-app").shadowRoot
+    .querySelector("div > div.ucs-standalone-outer-row-container > div > ucs-chat-landing").shadowRoot
+    .querySelector("div > div > div > div.fixed-content > ucs-search-bar").shadowRoot
+    .querySelector("#agent-search-prosemirror-editor").shadowRoot
+    .querySelector("div > div > div > p");
+"""
+
+# JavaScript: Step 20 - Get thinking message element
+_JS_GET_THINKING = """
+return document.querySelector("body > ucs-standalone-app").shadowRoot
+    .querySelector("div > div.ucs-standalone-outer-row-container > div > div.search-bar-and-results-container > div > ucs-results").shadowRoot
+    .querySelector("div > div > div.tile.chat-mode-conversation.chat-mode-conversation > div.chat-mode-scroller.tile-content > ucs-conversation").shadowRoot
+    .querySelector("div > div.turn.last > ucs-summary").shadowRoot
+    .querySelector("div > div > div.summary-contents > div.header.agent-thoughts-header > ucs-agent-thoughts").shadowRoot
+    .querySelector("div.header > div.thinking-message");
+"""
+
+# JavaScript: Step 21a - Click download button
+_JS_CLICK_DOWNLOAD = """
+return document.querySelector("body > ucs-standalone-app").shadowRoot
+    .querySelector("div > div.ucs-standalone-outer-row-container > div > div.search-bar-and-results-container > div > ucs-results").shadowRoot
+    .querySelector("div > div > div.tile.chat-mode-conversation.chat-mode-conversation > div.chat-mode-scroller.tile-content > ucs-conversation").shadowRoot
+    .querySelector("div > div > ucs-summary").shadowRoot
+    .querySelector("div > div > div.summary-contents > ucs-summary-attachments").shadowRoot
+    .querySelector("div > ucs-markdown-video").shadowRoot
+    .querySelector("div > div.video-actions > md-filled-icon-button").shadowRoot
+    .querySelector("#button > span.touch");
+"""
+
+# JavaScript: Step 21b - Click download confirmation
+_JS_CLICK_CONFIRM = """
+return document.querySelector("body > ucs-standalone-app").shadowRoot
+    .querySelector("div > div.ucs-standalone-outer-row-container > div > div.search-bar-and-results-container > div > ucs-results").shadowRoot
+    .querySelector("div > div > div.tile.chat-mode-conversation.chat-mode-conversation > div.chat-mode-scroller.tile-content > ucs-conversation").shadowRoot
+    .querySelector("div > div > ucs-summary").shadowRoot
+    .querySelector("div > div > div.summary-contents > ucs-summary-attachments").shadowRoot
+    .querySelector("div > ucs-markdown-video").shadowRoot
+    .querySelector("ucs-download-warning-dialog").shadowRoot
+    .querySelector("md-dialog > div:nth-child(3) > md-text-button.action-button").shadowRoot
+    .querySelector("#button > span.touch");
+"""
+
+# JavaScript: list semua button di shadow DOM untuk debug
 _JS_LIST_BUTTONS = """
 (function() {
     var result = [];
@@ -193,82 +182,6 @@ _JS_LIST_BUTTONS = """
     }
     scan(document, 0);
     return JSON.stringify(result);
-})();
-"""
-
-# JavaScript: cari tools button (page_info icon) di shadow DOM
-#
-# Prioritas 0: Exact path yang diketahui dari inspect element
-#   body > ucs-standalone-app
-#     .shadowRoot > ucs-chat-landing
-#     .shadowRoot > ucs-search-bar
-#     .shadowRoot > #tool-selector-menu-anchor
-#     .shadowRoot > #button
-#
-# Fallback: Recursive shadow DOM traversal mencari:
-#   - md-icon dengan text 'page_info' -> ancestor md-icon-button/button
-#   - md-icon-button / button dengan aria-label/title mengandung
-#     'tool', 'gem', 'extension', 'plugin', 'app'
-_JS_FIND_TOOLS_BTN = """
-(function() {
-    // ── Priority 0: Exact shadow DOM path ──────────────────────────────────
-    try {
-        var btn = document
-            .querySelector("body > ucs-standalone-app").shadowRoot
-            .querySelector("div > div.ucs-standalone-outer-row-container > div > ucs-chat-landing").shadowRoot
-            .querySelector("div > div > div > div.fixed-content > ucs-search-bar").shadowRoot
-            .querySelector("#tool-selector-menu-anchor").shadowRoot
-            .querySelector("#button");
-        if (btn) return btn;
-    } catch(e) {}
-
-    // ── Fallback: Recursive shadow DOM traversal ───────────────────────────
-    var ARIA_KEYWORDS = ['tool', 'gem', 'extension', 'plugin', 'app'];
-
-    function hasToolAria(el) {
-        var aria  = (el.getAttribute('aria-label') || '').toLowerCase();
-        var title = (el.getAttribute('title') || '').toLowerCase();
-        return ARIA_KEYWORDS.some(function(k) {
-            return aria.indexOf(k) !== -1 || title.indexOf(k) !== -1;
-        });
-    }
-
-    function findInRoot(root, depth) {
-        if (depth > 10) return null;
-
-        // Prioritas 1: md-icon dengan text 'page_info' -> ambil ancestor button-nya
-        var icons = root.querySelectorAll('md-icon');
-        for (var k = 0; k < icons.length; k++) {
-            if ((icons[k].textContent || '').trim() === 'page_info') {
-                var parent = icons[k].parentElement;
-                for (var up = 0; up < 5; up++) {
-                    if (!parent) break;
-                    var tag = parent.tagName.toLowerCase();
-                    if (tag === 'md-icon-button' || tag === 'button') return parent;
-                    parent = parent.parentElement;
-                }
-                return icons[k];
-            }
-        }
-
-        // Prioritas 2: md-icon-button atau button dengan aria-label/title tool-related
-        var candidates = root.querySelectorAll('md-icon-button, button');
-        for (var i = 0; i < candidates.length; i++) {
-            if (hasToolAria(candidates[i])) return candidates[i];
-        }
-
-        // Rekursif ke shadow roots
-        var all = root.querySelectorAll('*');
-        for (var j = 0; j < all.length; j++) {
-            if (all[j].shadowRoot) {
-                var found = findInRoot(all[j].shadowRoot, depth + 1);
-                if (found) return found;
-            }
-        }
-        return null;
-    }
-
-    return findInRoot(document, 0);
 })();
 """
 
@@ -757,97 +670,21 @@ class GeminiEnterpriseProcessor(threading.Thread):
         time.sleep(random.uniform(0.8, 1.2))
 
         self._log("Step 9: Clicking Verify button")
-        verify_clicked = False
-        for sel in [
-            "button[jsname='LgbsSe']",
-            "button[type='submit']",
-            ".YUhpIc-RLmnJb",
-        ]:
-            try:
-                els = driver.find_elements(By.CSS_SELECTOR, sel)
-                for el in els:
-                    if el.is_displayed():
-                        self._human_click(driver, el)
-                        self._log(f"Clicked verify: {sel}")
-                        verify_clicked = True
-                        break
-                if verify_clicked:
-                    break
-            except Exception:
-                pass
-
+        verify_clicked = self._click_verify_button(driver)
         if not verify_clicked:
-            for el in driver.find_elements(By.TAG_NAME, "button"):
-                try:
-                    if any(w in el.text.lower() for w in ["verify", "confirm", "continue"])\
-                            and el.is_displayed():
-                        self._human_click(driver, el)
-                        self._log("Clicked verify (text fallback)")
-                        verify_clicked = True
-                        break
-                except Exception:
-                    pass
+            self._log("Verify button click failed", "WARNING")
 
         time.sleep(random.uniform(2, 4))
 
         self._log("Step 10: Completing signup - entering name")
-        name_el = None
-        for sel in [
-            "input[formcontrolname='fullName']",
-            "input#mat-input-0",
-            "input[placeholder='Full name']",
-            "input[type='text'][required]",
-        ]:
-            el = self._wait_for(driver, sel, timeout=10)
-            if el and el.is_displayed():
-                name_el = el
-                self._log(f"Name input found: {sel}")
-                break
-
-        if name_el:
-            name = _random_name()
-            self._human_type(driver, name_el, name)
-            self._log(f"Name entered: {name}")
-            time.sleep(random.uniform(0.5, 1))
-        else:
+        name_entered = self._enter_name(driver)
+        if not name_entered:
             self._log("Name form not found, proceeding...", "WARNING")
 
         self._log("Step 11: Clicking 'Agree & get started'")
-        agree_clicked = False
-        for sel in [
-            ".mdc-button__label",
-            "button.mdc-button",
-            "button[mat-flat-button]",
-        ]:
-            try:
-                els = driver.find_elements(By.CSS_SELECTOR, sel)
-                for el in els:
-                    txt = (el.text or "").strip()
-                    if "agree" in txt.lower() or "get started" in txt.lower():
-                        try:
-                            btn = el.find_element(By.XPATH, "./ancestor::button")
-                            self._human_click(driver, btn)
-                        except Exception:
-                            self._human_click(driver, el)
-                        self._log("Clicked 'Agree & get started'")
-                        agree_clicked = True
-                        break
-                if agree_clicked:
-                    break
-            except Exception:
-                pass
-
+        agree_clicked = self._click_agree_button(driver)
         if not agree_clicked:
-            for el in driver.find_elements(By.TAG_NAME, "button"):
-                try:
-                    if ("agree" in el.text.lower() or "get started" in el.text.lower())\
-                            and el.is_displayed():
-                        self._human_click(driver, el)
-                        self._log("Clicked agree (fallback)")
-                        agree_clicked = True
-                        break
-                except Exception:
-                    pass
+            self._log("Agree button not clicked", "WARNING")
 
         self._log("Step 12: Waiting for 'Signing you in...' to disappear")
         self._wait_gone(driver, "h1.title", timeout=60)
@@ -861,31 +698,20 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
     # ── Submit email with error page retry ───────────────────────────────────────
     def _submit_email_with_retry(self, driver, email: str) -> bool:
-        EMAIL_SELECTORS = [
-            "input#email-input",
-            "input[jsname='YPqjbf']",
-            "input[name='loginHint']",
-            "input[type='email']",
-            "input[type='text']",
-        ]
-        SUBMIT_SELECTORS = [
-            "button#log-in-button",
-            "button[aria-label='Continue with email']",
-            "button[jsname='jXw9Fb']",
-            "button[type='submit']",
-        ]
-
         for attempt in range(1, MAX_EMAIL_SUBMIT_RETRY + 1):
             self._log(f"Step 3-4: Submit email attempt {attempt}/{MAX_EMAIL_SUBMIT_RETRY}")
             self._navigate_to_gemini_home(driver)
 
+            # Step 6: Input email menggunakan JS path yang sudah diverifikasi
             email_el = None
-            for sel in EMAIL_SELECTORS:
-                el = self._wait_for(driver, sel, timeout=15)
-                if el and el.is_displayed():
-                    email_el = el
-                    self._log(f"Email input found: {sel}")
-                    break
+            try:
+                email_el = driver.execute_script('return document.querySelector("#email-input");')
+                if email_el and email_el.is_displayed():
+                    self._log("Email input found: #email-input")
+                else:
+                    email_el = None
+            except Exception:
+                pass
 
             if not email_el:
                 self._log("Email input not found", "WARNING")
@@ -897,16 +723,16 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._log(f"Email entered: {email}")
             time.sleep(random.uniform(0.8, 1.5))
 
+            # Step 7: Klik submit button menggunakan JS path yang sudah diverifikasi
             submit_el = None
-            for sel in SUBMIT_SELECTORS:
-                try:
-                    el = driver.find_element(By.CSS_SELECTOR, sel)
-                    if el.is_displayed() and el.is_enabled():
-                        submit_el = el
-                        self._log(f"Submit button found: {sel}")
-                        break
-                except Exception:
-                    pass
+            try:
+                submit_el = driver.execute_script(
+                    'return document.querySelector("#log-in-button > span.UywwFc-RLmnJb");'
+                )
+                if submit_el and submit_el.is_displayed():
+                    self._log("Submit button found: #log-in-button > span.UywwFc-RLmnJb")
+            except Exception:
+                pass
 
             if submit_el:
                 self._human_click(driver, submit_el)
@@ -940,6 +766,29 @@ class GeminiEnterpriseProcessor(threading.Thread):
         return False
 
     def _submit_otp(self, driver, otp: str) -> bool:
+        # Step 11: Input OTP menggunakan JS path yang sudah diverifikasi
+        try:
+            otp_input = driver.execute_script(
+                'return document.querySelector("#yDmH0d > c-wiz > div > div > div.keerLb > div > div > div > form > div:nth-child(1) > div > div.AFffCd > div > input");'
+            )
+            if otp_input:
+                driver.execute_script(
+                    "arguments[0].value = arguments[1];"
+                    "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
+                    "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
+                    otp_input, otp
+                )
+                self._log(f"OTP entered via verified selector: {otp}")
+                time.sleep(0.3)
+                try:
+                    otp_input.send_keys(otp)
+                except Exception:
+                    pass
+                return True
+        except Exception as e:
+            self._log(f"OTP input error: {e}", "WARNING")
+
+        # Fallback methods
         for sel in [
             "input.J6L5wc",
             "input[jsname='ovqh0b']",
@@ -953,24 +802,11 @@ class GeminiEnterpriseProcessor(threading.Thread):
                     "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
                     el, otp
                 )
-                self._log(f"OTP entered via {sel}: {otp}")
+                self._log(f"OTP entered via fallback {sel}: {otp}")
                 time.sleep(0.3)
-                try:
-                    el.send_keys(otp)
-                except Exception:
-                    pass
                 return True
             except Exception:
                 pass
-
-        try:
-            inputs = driver.find_elements(By.CSS_SELECTOR,
-                "input[type='text'], input[autocomplete='one-time-code']")
-            for inp in inputs:
-                self._human_type(driver, inp, otp)
-                return True
-        except Exception:
-            pass
 
         try:
             ActionChains(driver).send_keys(otp).perform()
@@ -979,146 +815,162 @@ class GeminiEnterpriseProcessor(threading.Thread):
             pass
         return False
 
+    def _click_verify_button(self, driver) -> bool:
+        # Step 12: Klik verify button menggunakan JS path yang sudah diverifikasi
+        try:
+            verify_btn = driver.execute_script(
+                'return document.querySelector("#yDmH0d > c-wiz > div > div > div.keerLb > div > div > div > form > div.rPlx0b > div > div:nth-child(1) > span > div.VfPpkd-dgl2Hf-ppHlrf-sM5MNb > button > span.YUhpIc-RLmnJb");'
+            )
+            if verify_btn and verify_btn.is_displayed():
+                self._human_click(driver, verify_btn)
+                self._log("Clicked verify button via verified selector")
+                return True
+        except Exception as e:
+            self._log(f"Verify button click error: {e}", "WARNING")
+
+        # Fallback methods
+        for sel in [
+            "button[jsname='LgbsSe']",
+            "button[type='submit']",
+            ".YUhpIc-RLmnJb",
+        ]:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                for el in els:
+                    if el.is_displayed():
+                        self._human_click(driver, el)
+                        self._log(f"Clicked verify via fallback: {sel}")
+                        return True
+            except Exception:
+                pass
+
+        for el in driver.find_elements(By.TAG_NAME, "button"):
+            try:
+                if any(w in el.text.lower() for w in ["verify", "confirm", "continue"])\
+                        and el.is_displayed():
+                    self._human_click(driver, el)
+                    self._log("Clicked verify (text fallback)")
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _enter_name(self, driver) -> bool:
+        # Step 13: Input nama menggunakan JS path yang sudah diverifikasi
+        name_el = None
+        try:
+            name_el = driver.execute_script('return document.querySelector("#mat-input-0");')
+            if name_el and name_el.is_displayed():
+                self._log("Name input found: #mat-input-0")
+        except Exception:
+            pass
+
+        # Fallback selectors
+        if not name_el:
+            for sel in [
+                "input[formcontrolname='fullName']",
+                "input[placeholder='Full name']",
+                "input[type='text'][required]",
+            ]:
+                el = self._wait_for(driver, sel, timeout=10)
+                if el and el.is_displayed():
+                    name_el = el
+                    self._log(f"Name input found via fallback: {sel}")
+                    break
+
+        if name_el:
+            name = _random_name()
+            self._human_type(driver, name_el, name)
+            self._log(f"Name entered: {name}")
+            time.sleep(random.uniform(0.5, 1))
+            return True
+        return False
+
+    def _click_agree_button(self, driver) -> bool:
+        # Step 14: Klik 'Agree & get started' menggunakan JS path yang sudah diverifikasi
+        try:
+            agree_btn = driver.execute_script(
+                'return document.querySelector("body > saasfe-root > main > saasfe-onboard-component > div > div > div > form > button > span.mat-mdc-button-touch-target");'
+            )
+            if agree_btn and agree_btn.is_displayed():
+                self._human_click(driver, agree_btn)
+                self._log("Clicked 'Agree & get started' via verified selector")
+                return True
+        except Exception as e:
+            self._log(f"Agree button click error: {e}", "WARNING")
+
+        # Fallback methods
+        for sel in [
+            ".mdc-button__label",
+            "button.mdc-button",
+            "button[mat-flat-button]",
+        ]:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                for el in els:
+                    txt = (el.text or "").strip()
+                    if "agree" in txt.lower() or "get started" in txt.lower():
+                        try:
+                            btn = el.find_element(By.XPATH, "./ancestor::button")
+                            self._human_click(driver, btn)
+                        except Exception:
+                            self._human_click(driver, el)
+                        self._log("Clicked 'Agree & get started' (fallback)")
+                        return True
+            except Exception:
+                pass
+        return False
+
     def _initial_setup(self, driver):
+        # Step 16: Dismiss popup menggunakan shadow DOM path yang sudah diverifikasi
         self._log("Step 16: Closing 'I'll do this later' popup...")
-        dismissed = self._dismiss_later_popup(driver)
-        if dismissed:
-            self._log("Popup 'I'll do this later' dismissed.")
-        else:
+        dismissed = False
+        try:
+            btn = driver.execute_script(_JS_DISMISS_POPUP)
+            if btn:
+                driver.execute_script("arguments[0].click();", btn)
+                self._log("Popup 'I'll do this later' dismissed via verified shadow DOM path")
+                dismissed = True
+        except Exception as e:
+            self._log(f"Dismiss popup error: {e}", "WARNING")
+
+        if not dismissed:
             self._log("No 'do this later' popup found, proceeding...", "WARNING")
         time.sleep(random.uniform(1, 2))
 
+        # Step 17: Klik tools button menggunakan shadow DOM path yang sudah diverifikasi
         self._log("Step 17: Clicking tools button (page_info icon)...")
         tools_clicked = False
-
-        # Strategy 1: JS shadow DOM traversal (Priority 0 = exact path, then recursive)
         try:
-            btn = driver.execute_script(_JS_FIND_TOOLS_BTN)
+            btn = driver.execute_script(_JS_CLICK_TOOLS)
             if btn:
                 driver.execute_script("arguments[0].click();", btn)
-                self._log("Tools button clicked via shadow DOM JS traversal")
+                self._log("Tools button clicked via verified shadow DOM path")
                 tools_clicked = True
         except Exception as e:
-            self._log(f"Tools button JS traversal error: {e}", "WARNING")
-
-        # Strategy 2: CSS selectors with getBoundingClientRect visibility check
-        # (is_displayed() returns False for custom elements even when visible)
-        if not tools_clicked:
-            for sel in [
-                "md-icon-button[aria-label*='tool' i]",
-                "md-icon-button[aria-label*='gem' i]",
-                "md-icon-button[aria-label*='extension' i]",
-                "md-icon-button[aria-label*='app' i]",
-                "button[aria-label*='tool' i]",
-                "[slot='icon-button']",
-            ]:
-                try:
-                    els = driver.find_elements(By.CSS_SELECTOR, sel)
-                    for el in els:
-                        try:
-                            visible = el.is_displayed() or driver.execute_script(
-                                "return arguments[0].getBoundingClientRect().width > 0;", el)
-                            if visible:
-                                driver.execute_script("arguments[0].click();", el)
-                                self._log(f"Tools button clicked: {sel}")
-                                tools_clicked = True
-                                break
-                        except Exception:
-                            pass
-                    if tools_clicked:
-                        break
-                except Exception:
-                    pass
-
-        # Strategy 3: light-DOM md-icon page_info fallback
-        if not tools_clicked:
-            try:
-                icons = driver.find_elements(By.TAG_NAME, "md-icon")
-                for icon in icons:
-                    if "page_info" in (icon.text or "").strip():
-                        try:
-                            btn = icon.find_element(
-                                By.XPATH, "./ancestor::button | ./ancestor::md-icon-button")
-                            driver.execute_script("arguments[0].click();", btn)
-                            self._log("Clicked tools button via md-icon page_info")
-                            tools_clicked = True
-                        except Exception:
-                            driver.execute_script("arguments[0].click();", icon)
-                            tools_clicked = True
-                        break
-            except Exception:
-                pass
+            self._log(f"Tools button click error: {e}", "WARNING")
 
         if not tools_clicked:
             self._log("Tools button not found - running debug scan...", "WARNING")
-            # Debug: log semua md-icon-button visible di shadow DOM untuk analisis
-            try:
-                raw = driver.execute_script("""
-                (function() {
-                    var result = [];
-                    function scan(root, depth) {
-                        if (depth > 8) return;
-                        var btns = root.querySelectorAll('md-icon-button, button[aria-label]');
-                        btns.forEach(function(b) {
-                            var rect = b.getBoundingClientRect();
-                            if (rect.width > 0) {
-                                result.push({
-                                    tag: b.tagName,
-                                    aria: b.getAttribute('aria-label') || '',
-                                    title: b.getAttribute('title') || '',
-                                    text: (b.textContent || '').trim().substring(0, 50)
-                                });
-                            }
-                        });
-                        root.querySelectorAll('*').forEach(function(el) {
-                            if (el.shadowRoot) scan(el.shadowRoot, depth + 1);
-                        });
-                    }
-                    scan(document, 0);
-                    return JSON.stringify(result);
-                })();
-                """)
-                btns_info = json.loads(raw) if raw else []
-                for info in btns_info:
-                    self._log(
-                        f"  [ICON-BTN] tag={info['tag']} aria='{info['aria'][:50]}' "
-                        f"title='{info['title'][:30]}' text='{info['text'][:40]}'",
-                        "WARNING"
-                    )
-            except Exception:
-                pass
             self._debug_dump(driver, "tools_btn_not_found")
             return
 
         time.sleep(random.uniform(1, 1.5))
 
+        # Step 18: Klik 'Create videos with Veo' menggunakan shadow DOM path yang sudah diverifikasi
         self._log("Step 18: Selecting 'Create videos with Veo'...")
         veo_clicked = False
-        for sel in ["div[slot='headline']", "[slot='headline']"]:
-            try:
-                els = driver.find_elements(By.CSS_SELECTOR, sel)
-                for el in els:
-                    txt = (el.text or "").strip().lower()
-                    if "create video" in txt or "veo" in txt:
-                        try:
-                            item = el.find_element(
-                                By.XPATH,
-                                "./ancestor::md-menu-item | "
-                                "./ancestor::li | "
-                                "./ancestor::*[@role='menuitem']"
-                            )
-                            self._human_click(driver, item)
-                        except Exception:
-                            self._human_click(driver, el)
-                        self._log("Clicked 'Create videos with Veo'")
-                        veo_clicked = True
-                        break
-                if veo_clicked:
-                    break
-            except Exception:
-                pass
+        try:
+            menu_item = driver.execute_script(_JS_CLICK_VEO)
+            if menu_item:
+                driver.execute_script("arguments[0].click();", menu_item)
+                self._log("Clicked 'Create videos with Veo' via verified shadow DOM path")
+                veo_clicked = True
+        except Exception as e:
+            self._log(f"Veo menu click error: {e}", "WARNING")
 
         if not veo_clicked:
+            # Fallback: text search
             for el in driver.find_elements(By.XPATH,
                     "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
                     "'abcdefghijklmnopqrstuvwxyz'),'create video') or "
@@ -1136,112 +988,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
         time.sleep(random.uniform(1, 2))
         self._log("Initial setup completed!")
 
-    # ── Dismiss 'I'll do this later' popup ───────────────────────────────────────
-    def _dismiss_later_popup(self, driver) -> bool:
-        """
-        Popup 'I'll do this later' di Gemini Business menggunakan Web Component
-        dengan Shadow DOM bertingkat. Selenium find_elements() tidak bisa menembus
-        shadow root, sehingga teks tombol tidak terbaca.
-
-        Strategi (prioritas):
-          1. JS shadow DOM traversal (_JS_FIND_DISMISS_BTN)
-             -> Rekursif semua shadowRoot, cari button dengan teks 'later'/'skip'/'dismiss'
-             -> Klik langsung via JS
-          2. Polling 10 detik: JS traversal berulang (popup mungkin muncul terlambat)
-          3. Fallback: debug dump semua button di shadow DOM via _JS_LIST_BUTTONS
-             -> log untuk analisis, lalu coba klik button#button pertama yang visible
-        """
-        # Tunggu halaman settle
-        time.sleep(random.uniform(2, 3))
-
-        # Strategy 1: Langsung coba JS shadow DOM traversal
-        try:
-            btn = driver.execute_script(_JS_FIND_DISMISS_BTN)
-            if btn:
-                driver.execute_script("arguments[0].click();", btn)
-                self._log("[Shadow DOM] Clicked 'I'll do this later' via JS traversal")
-                return True
-        except Exception as e:
-            self._log(f"JS shadow DOM traversal error: {e}", "WARNING")
-
-        # Strategy 2: Polling 10 detik
-        self._log("Popup not found immediately, polling 10s...")
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            try:
-                btn = driver.execute_script(_JS_FIND_DISMISS_BTN)
-                if btn:
-                    driver.execute_script("arguments[0].click();", btn)
-                    self._log("[Shadow DOM] Clicked 'I'll do this later' (polling)")
-                    return True
-            except Exception:
-                pass
-            time.sleep(0.5)
-
-        # Strategy 3: Debug dump semua button di shadow DOM
-        self._log("Still not found. Listing all shadow DOM buttons for debug...", "WARNING")
-        try:
-            raw = driver.execute_script(_JS_LIST_BUTTONS)
-            buttons_info = json.loads(raw) if raw else []
-            for info in buttons_info:
-                if info.get("visible"):
-                    self._log(
-                        f"  [BTN] tag={info['tag']} id='{info['id']}' "
-                        f"cls='{info['cls'][:40]}' aria='{info['aria'][:40]}' "
-                        f"text='{info['text'][:60]}'",
-                        "WARNING"
-                    )
-        except Exception as e:
-            self._log(f"Button listing failed: {e}", "WARNING")
-
-        # Strategy 3b: Blind click - klik button#button visible pertama yang bukan download/icon
-        # (jika popup ada tapi teks tidak terdeteksi karena encoding/language berbeda)
-        try:
-            clicked = driver.execute_script("""
-                (function() {
-                    var SKIP_ARIA = ['download', 'close', 'menu', 'search', 'send'];
-                    function isSkip(el) {
-                        var aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                        var cls  = (el.getAttribute('class') || '').toLowerCase();
-                        return SKIP_ARIA.some(function(k) { return aria.indexOf(k) !== -1; })
-                            || cls.indexOf('icon-button') !== -1
-                            || cls.indexOf('send') !== -1;
-                    }
-                    function scan(root, depth) {
-                        if (depth > 10) return null;
-                        var btns = root.querySelectorAll('button#button, button.button');
-                        for (var i = 0; i < btns.length; i++) {
-                            var b = btns[i];
-                            if (!isSkip(b) && b.offsetParent !== null) {
-                                b.click();
-                                return b.outerHTML.substring(0, 100);
-                            }
-                        }
-                        var all = root.querySelectorAll('*');
-                        for (var j = 0; j < all.length; j++) {
-                            if (all[j].shadowRoot) {
-                                var r = scan(all[j].shadowRoot, depth + 1);
-                                if (r) return r;
-                            }
-                        }
-                        return null;
-                    }
-                    return scan(document, 0);
-                })();
-            """)
-            if clicked:
-                self._log(
-                    f"[Shadow DOM] Blind-clicked first visible button#button: {clicked}",
-                    "WARNING"
-                )
-                return True
-        except Exception as e:
-            self._log(f"Blind click failed: {e}", "WARNING")
-
-        # Screenshot untuk debug
-        self._debug_dump(driver, "dismiss_popup_failed")
-        return False
-
     # ── Process single prompt ───────────────────────────────────────────────
     def _process_prompt(
         self, driver, prompt: str, prompt_num: int, total: int, delay: int
@@ -1254,20 +1000,30 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
         self._progress(int((prompt_num / total) * 100), f"Prompt {prompt_num}/{total}")
 
-        self._log(f"Step 14: Inputting prompt {prompt_num}/{total}")
+        # Step 19: Input prompt menggunakan shadow DOM path yang sudah diverifikasi
+        self._log(f"Step 19: Inputting prompt {prompt_num}/{total}")
         prompt_el = None
-        for sel in [
-            "div.ProseMirror",
-            "div[contenteditable='true'].ProseMirror",
-            "[contenteditable='true']",
-            "div[role='textbox']",
-            "textarea",
-        ]:
-            el = self._wait_for(driver, sel, timeout=10)
-            if el and el.is_displayed():
-                prompt_el = el
-                self._log(f"Prompt input found: {sel}")
-                break
+        try:
+            prompt_el = driver.execute_script(_JS_GET_PROMPT_INPUT)
+            if prompt_el and prompt_el.is_displayed():
+                self._log("Prompt input found via verified shadow DOM path")
+        except Exception as e:
+            self._log(f"Prompt input error: {e}", "WARNING")
+
+        # Fallback selectors
+        if not prompt_el:
+            for sel in [
+                "div.ProseMirror",
+                "div[contenteditable='true'].ProseMirror",
+                "[contenteditable='true']",
+                "div[role='textbox']",
+                "textarea",
+            ]:
+                el = self._wait_for(driver, sel, timeout=10)
+                if el and el.is_displayed():
+                    prompt_el = el
+                    self._log(f"Prompt input found via fallback: {sel}")
+                    break
 
         if not prompt_el:
             self._log("Prompt input not found", "ERROR")
@@ -1297,12 +1053,13 @@ class GeminiEnterpriseProcessor(threading.Thread):
         return self._wait_for_generation(driver, prompt_num)
 
     def _wait_for_generation(self, driver, prompt_num: int) -> str:
+        # Step 20: Monitor thinking message menggunakan shadow DOM path
         thinking_appeared = False
         thinking_start    = None
         for _ in range(10):
             try:
-                els = driver.find_elements(By.CSS_SELECTOR, "div.thinking-message")
-                if any(el.is_displayed() for el in els):
+                thinking_el = driver.execute_script(_JS_GET_THINKING)
+                if thinking_el and thinking_el.is_displayed():
                     thinking_appeared = True
                     thinking_start    = time.time()
                     self._log("Thinking...")
@@ -1314,8 +1071,8 @@ class GeminiEnterpriseProcessor(threading.Thread):
         if thinking_appeared and thinking_start:
             time.sleep(2)
             try:
-                els = driver.find_elements(By.CSS_SELECTOR, "div.thinking-message")
-                thinking_gone = not any(el.is_displayed() for el in els)
+                thinking_el = driver.execute_script(_JS_GET_THINKING)
+                thinking_gone = not (thinking_el and thinking_el.is_displayed())
                 elapsed       = time.time() - thinking_start
                 if thinking_gone and elapsed < RATE_LIMIT_THINKING_THRESHOLD:
                     self._log(f"Thinking gone in {elapsed:.1f}s - RATE LIMIT!")
@@ -1324,7 +1081,17 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 pass
 
         self._log("Waiting for thinking to complete...")
-        self._wait_gone(driver, "div.thinking-message", timeout=120)
+        # Wait for thinking to complete using shadow DOM
+        start = time.time()
+        while time.time() - start < 120:
+            try:
+                thinking_el = driver.execute_script(_JS_GET_THINKING)
+                if not (thinking_el and thinking_el.is_displayed()):
+                    break
+            except Exception:
+                break
+            time.sleep(0.5)
+        
         self._log("Thinking completed. Waiting for video render...")
 
         start = time.time()
@@ -1342,21 +1109,13 @@ class GeminiEnterpriseProcessor(threading.Thread):
                     self._log("Rate limit message on page")
                     return "rate_limit"
 
-                dl_btns = driver.find_elements(
-                    By.CSS_SELECTOR,
-                    "button#button[aria-label='Download video file']"
-                )
-                if dl_btns and any(b.is_displayed() for b in dl_btns):
-                    break
-
-                dl_btns = driver.find_elements(
-                    By.CSS_SELECTOR,
-                    "button[aria-label*='Download' i], "
-                    "button[aria-label*='download' i], "
-                    "a[download]"
-                )
-                if dl_btns and any(b.is_displayed() for b in dl_btns):
-                    break
+                # Check if download button is available via shadow DOM
+                try:
+                    dl_btn = driver.execute_script(_JS_CLICK_DOWNLOAD)
+                    if dl_btn:
+                        break
+                except Exception:
+                    pass
 
                 if elapsed % 15 == 0 and elapsed > 0:
                     self._log(f"Still rendering... ({elapsed}s)")
@@ -1373,29 +1132,15 @@ class GeminiEnterpriseProcessor(threading.Thread):
         return self._download_video(driver, prompt_num)
 
     def _download_video(self, driver, prompt_num: int) -> str:
+        # Step 21a: Klik download button menggunakan shadow DOM path yang sudah diverifikasi
         self._log("Step 21a: Clicking download button...")
         dl_btn = None
-
-        for sel in [
-            "button#button[aria-label='Download video file']",
-            "button[aria-label='Download video file']",
-            "button#button.icon-button[aria-label*='Download' i]",
-            "button#button[aria-label*='Download' i]",
-            "button.icon-button[aria-label*='Download' i]",
-            "button[aria-label*='download' i]",
-            "a[download]",
-        ]:
-            try:
-                els = driver.find_elements(By.CSS_SELECTOR, sel)
-                for el in els:
-                    if el.is_displayed():
-                        dl_btn = el
-                        self._log(f"Download button found: {sel}")
-                        break
-                if dl_btn:
-                    break
-            except Exception:
-                pass
+        try:
+            dl_btn = driver.execute_script(_JS_CLICK_DOWNLOAD)
+            if dl_btn:
+                self._log("Download button found via verified shadow DOM path")
+        except Exception as e:
+            self._log(f"Download button error: {e}", "WARNING")
 
         if not dl_btn:
             self._log("Download button not found", "ERROR")
@@ -1409,65 +1154,17 @@ class GeminiEnterpriseProcessor(threading.Thread):
         self._log("Download button clicked")
         time.sleep(random.uniform(1.5, 2.5))
 
+        # Step 21b: Klik konfirmasi download menggunakan shadow DOM path yang sudah diverifikasi
         self._log("Step 21b: Waiting for download confirmation popup...")
         confirm_clicked = False
-
-        POPUP_CONTAINERS = [
-            "md-dialog",
-            "[role='dialog']",
-            "[role='alertdialog']",
-            ".dialog",
-            ".modal",
-            "dialog",
-        ]
-        popup_el = None
-        deadline = time.time() + 5
-        while time.time() < deadline and not popup_el:
-            for sel in POPUP_CONTAINERS:
-                try:
-                    els = driver.find_elements(By.CSS_SELECTOR, sel)
-                    for el in els:
-                        if el.is_displayed():
-                            popup_el = el
-                            self._log(f"Popup container found: {sel}")
-                            break
-                    if popup_el:
-                        break
-                except Exception:
-                    pass
-            if not popup_el:
-                time.sleep(0.3)
-
-        if popup_el:
-            for sel in ["button#button.button", "button#button", "button.button"]:
-                try:
-                    btn = popup_el.find_element(By.CSS_SELECTOR, sel)
-                    if btn.is_displayed():
-                        self._js_click(driver, btn)
-                        self._log(f"Confirmation button clicked in popup: {sel}")
-                        confirm_clicked = True
-                        break
-                except Exception:
-                    pass
-        else:
-            self._log("Popup container not found, searching whole page...", "WARNING")
-            for sel in ["button#button.button", "button#button", "button.button"]:
-                try:
-                    els = driver.find_elements(By.CSS_SELECTOR, sel)
-                    for btn in els:
-                        aria = (btn.get_attribute("aria-label") or "").lower()
-                        cls  = (btn.get_attribute("class") or "").lower()
-                        if "icon-button" in cls or "download" in aria:
-                            continue
-                        if btn.is_displayed():
-                            self._js_click(driver, btn)
-                            self._log(f"Confirmation button clicked (fallback): {sel}")
-                            confirm_clicked = True
-                            break
-                    if confirm_clicked:
-                        break
-                except Exception:
-                    pass
+        try:
+            confirm_btn = driver.execute_script(_JS_CLICK_CONFIRM)
+            if confirm_btn:
+                self._js_click(driver, confirm_btn)
+                self._log("Confirmation button clicked via verified shadow DOM path")
+                confirm_clicked = True
+        except Exception as e:
+            self._log(f"Confirmation button error: {e}", "WARNING")
 
         if not confirm_clicked:
             self._log("No confirmation popup - download may proceed directly", "WARNING")
