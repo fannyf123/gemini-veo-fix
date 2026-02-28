@@ -7,19 +7,19 @@ Otomasi mailticking.com sesuai tampilan nyata:
   +------------------------------------------+
   | Your Temp Email is Ready                 |
   | [a.mzho.x.v.z.idbke@gmail.com] [Change] |
-  |  [x] abc@domain.com                     |
-  |  [x] a.b.c@gmail.com   <-- HANYA ini    |
-  |  [x] abc@gmail.com      <-- uncheck     |
-  |  [x] abc+d@gmail.com    <-- uncheck     |
-  |  [x] abc@googlemail.com <-- uncheck     |
+  |  [x] abc@domain.com      <- uncheck     |
+  |  [ ] a.b.c@gmail.com     <- uncheck     |
+  |  [ ] abc@gmail.com       <- uncheck     |
+  |  [ ] abc+d@gmail.com     <- uncheck     |
+  |  [x] abc@googlemail.com  <- HANYA ini   |
   |          [Activate]                     |
   +------------------------------------------+
 
 Alur:
   1. Tunggu modal muncul
-  2. Uncheck semua checkbox KECUALI "a.b.c@gmail.com"
-  3. Klik Change → email baru generate
-  4. Klik Activate → modal tutup, inbox aktif
+  2. Uncheck semua checkbox KECUALI "abc@googlemail.com"
+  3. Klik Change -> email baru generate dengan format googlemail
+  4. Klik Activate -> modal tutup, inbox aktif
   5. Baca email aktif dari inbox header
 """
 import re
@@ -130,11 +130,11 @@ class MailtickingClient:
             self._log_cb(msg, level)
 
     def _js_click(self, driver, element):
-        """JavaScript click — selalu bypass overlay/modal."""
+        """JavaScript click - selalu bypass overlay/modal."""
         driver.execute_script("arguments[0].click();", element)
 
     def _safe_click(self, driver, element):
-        """Klik dengan 3 fallback: normal → scroll+click → JS click."""
+        """Klik dengan 3 fallback: normal -> scroll+click -> JS click."""
         for attempt in range(3):
             try:
                 if attempt == 1:
@@ -153,7 +153,7 @@ class MailtickingClient:
                 time.sleep(0.3)
 
     def _wait_for_modal(self, driver, timeout: int = 10) -> bool:
-        """Tunggu modal 'Your Temp Email is Ready' muncul. Return True jika ada."""
+        """Tunggu modal 'Your Temp Email is Ready' muncul."""
         try:
             WebDriverWait(driver, timeout).until(
                 EC.visibility_of_element_located(
@@ -163,7 +163,6 @@ class MailtickingClient:
             return True
         except TimeoutException:
             pass
-        # Fallback: cek apakah ada elemen Activate di halaman
         try:
             els = driver.find_elements(By.XPATH,
                 "//button[contains(translate(.,"
@@ -174,7 +173,7 @@ class MailtickingClient:
         except Exception:
             return False
 
-    # ── Open tab ──────────────────────────────────────────────────────────
+    # -- Open tab -------------------------------------------------------------
     def open_mailticking_tab(self, driver) -> str:
         self._log("Opening mailticking.com...")
         driver.execute_script("window.open('about:blank', '_blank');")
@@ -191,73 +190,54 @@ class MailtickingClient:
         self._log("mailticking.com loaded.")
         return driver.current_window_handle
 
-    # ── get_fresh_email: alur utama sesuai screenshot ─────────────────────────
+    # -- get_fresh_email ------------------------------------------------------
     def get_fresh_email(self, driver) -> str:
         """
         Alur modal mailticking:
           1. Tunggu modal muncul
-          2. Set checkbox: HANYA centang a.b.c@gmail.com, uncheck sisanya
+          2. Set checkbox: HANYA centang abc@googlemail.com, uncheck sisanya
           3. Klik Change
           4. Klik Activate
-          5. Tunggu modal tutup / halaman reload
+          5. Tunggu modal tutup
           6. Baca email aktif
         """
-        # Tunggu modal muncul
         modal_found = self._wait_for_modal(driver, timeout=8)
         if modal_found:
             self._log("Modal 'Your Temp Email is Ready' detected.")
         else:
             self._log("Modal not detected, proceeding anyway...", "WARNING")
 
-        # ─ Step 1: Konfigurasi checkboxes ─────────────────────────────────
-        # Format yang INGIN kita pakai: a.b.c@gmail.com
-        # Format lain: abc@domain.com, abc@gmail.com, abc+d@gmail.com,
-        #              abc@googlemail.com  → semua UNCHECK
         self._configure_checkboxes(driver)
         time.sleep(0.5)
 
-        # ─ Step 2: Baca email sebelum Change ──────────────────────────────
         old_email = self._read_current_email(driver)
         self._log(f"Current email: {old_email}")
 
-        # ─ Step 3: Klik Change ───────────────────────────────────────────
         self._click_change(driver)
         time.sleep(random.uniform(1.5, 2.5))
 
-        # ─ Step 4: Baca email baru ───────────────────────────────────────
         new_email = self._read_current_email(driver)
-        if new_email and new_email != old_email:
-            self._log(f"New email obtained: {new_email}")
-        elif new_email:
-            self._log(f"New email obtained: {new_email}")
-        else:
-            self._log("Could not read new email from input", "WARNING")
+        self._log(f"New email obtained: {new_email}" if new_email else "Could not read new email")
 
-        # ─ Step 5: Klik Activate ────────────────────────────────────────
         self._click_activate(driver)
-
-        # ─ Step 6: Tunggu modal hilang / inbox ready ──────────────────────
         self._wait_modal_closed(driver)
 
-        # Baca email final dari halaman setelah modal tutup
         final_email = self._read_email_from_page(driver) or new_email
         self._log(f"Temp email obtained: {final_email}")
         return final_email
 
-    # ── Sub-helpers ──────────────────────────────────────────────────────────
+    # -- Sub-helpers ----------------------------------------------------------
 
     def _configure_checkboxes(self, driver):
         """
-        Di modal mailticking ada 4 format:
+        Target: HANYA centang abc@googlemail.com, uncheck semua yang lain.
+
+        Format checkbox di mailticking:
           [x] abc@domain.com
-          [x] a.b.c@gmail.com    <- HANYA ini yang dipertahankan
+          [x] a.b.c@gmail.com
           [x] abc@gmail.com
           [x] abc+d@gmail.com
-          [x] abc@googlemail.com
-
-        Cara kerja: iterasi semua checkbox, baca label teksnya,
-        set ke checked jika label mengandung 'a.b.c' atau 'dot',
-        uncheck jika bukan.
+          [x] abc@googlemail.com  <- SATU-SATUNYA yang harus checked
         """
         try:
             checkboxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
@@ -267,33 +247,25 @@ class MailtickingClient:
 
             for cb in checkboxes:
                 try:
-                    # Baca label teks
                     cb_id    = cb.get_attribute("id") or ""
                     cb_value = (cb.get_attribute("value") or "").lower()
                     cb_name  = (cb.get_attribute("name")  or "").lower()
 
-                    # Cari label text via <label for=id> atau parent/sibling
                     label_text = ""
                     if cb_id:
                         try:
-                            lbl = driver.find_element(By.XPATH,
-                                f"//label[@for='{cb_id}']"
-                            )
+                            lbl = driver.find_element(By.XPATH, f"//label[@for='{cb_id}']")
                             label_text = lbl.text.lower()
                         except Exception:
                             pass
-
                     if not label_text:
                         try:
-                            # label yang wraps checkbox
                             lbl = cb.find_element(By.XPATH, "./ancestor::label")
                             label_text = lbl.text.lower()
                         except Exception:
                             pass
-
                     if not label_text:
                         try:
-                            # sibling span/text setelah checkbox
                             parent = cb.find_element(By.XPATH, "..")
                             label_text = parent.text.lower()
                         except Exception:
@@ -301,26 +273,12 @@ class MailtickingClient:
 
                     combined = label_text + cb_value + cb_name
 
-                    # Ini format yang kita mau: a.b.c@gmail.com
-                    # Cirinya: ada "." sebelum "@" dan ada "@gmail.com"
-                    # dan TIDAK ada "+" (bukan abc+d)
-                    # dan TIDAK ada "googlemail"
-                    # dan bukan abc@gmail.com (tanpa titik di local part yang berarti)
-                    is_dotted_gmail = (
-                        re.search(r'a\.b\.c@gmail', combined) or
-                        re.search(r'[a-z]+\.[a-z]+\.[a-z]+@gmail', combined) or
-                        # mailticking biasanya beri label "a.b.c@gmail.com"
-                        ("." in combined.split("@")[0] if "@gmail.com" in combined else False)
-                        and "+" not in combined
-                        and "googlemail" not in combined
-                    )
-
-                    # Fallback: jika tidak bisa baca label, ambil posisi
-                    # checkbox ke-2 (index 1) = a.b.c@gmail.com
+                    # Target: abc@googlemail.com
+                    is_googlemail = "googlemail" in combined
 
                     currently_checked = cb.is_selected()
 
-                    if is_dotted_gmail:
+                    if is_googlemail:
                         # Harus CHECKED
                         if not currently_checked:
                             self._js_click(driver, cb)
@@ -342,7 +300,6 @@ class MailtickingClient:
             self._log(f"Checkbox config error: {e}", "WARNING")
 
     def _read_current_email(self, driver) -> str:
-        """Baca email dari input field di modal."""
         for sel in [
             ".modal input[type='text']",
             ".modal input[type='email']",
@@ -362,10 +319,6 @@ class MailtickingClient:
         return ""
 
     def _read_email_from_page(self, driver) -> str:
-        """
-        Baca email dari halaman utama inbox setelah modal ditutup.
-        Mailticking biasanya tampilkan email di header/navbar.
-        """
         for sel in [
             "input[type='text']", "input[type='email']",
             "input[readonly]", "#email",
@@ -379,12 +332,10 @@ class MailtickingClient:
                     return val.strip()
             except Exception:
                 pass
-        # Fallback regex di page source (non-gmail domain)
         try:
             src = driver.page_source
             m = re.search(
-                r'value="([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})"',
-                src
+                r'value="([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})"', src
             )
             if m and "@" in m.group(1):
                 return m.group(1)
@@ -393,16 +344,10 @@ class MailtickingClient:
         return ""
 
     def _click_change(self, driver):
-        """Klik tombol Change di dalam modal."""
-        # Selector spesifik tombol Change di mailticking
         CHANGE_SELECTORS = [
-            # Tombol Change dengan icon fa-refresh
-            "button.btn-default fa-refresh",
-            # Bootstrap button group Change
             ".input-group-btn button",
             ".input-group button",
             "button.btn-default",
-            # Teks Change
         ]
         for sel in CHANGE_SELECTORS:
             try:
@@ -414,26 +359,22 @@ class MailtickingClient:
             except Exception:
                 pass
 
-        # Fallback: cari button dengan teks 'change'
         for btn in driver.find_elements(By.TAG_NAME, "button"):
             try:
                 txt = (btn.text or "").lower().strip()
-                # Tombol Change biasanya tidak punya teks, hanya icon
-                # tapi kadang ada teks  Change atau " Change"
-                if "change" in txt or btn.get_attribute("title", "").lower() == "change":
+                if "change" in txt or (btn.get_attribute("title") or "").lower() == "change":
                     self._js_click(driver, btn)
                     self._log("Clicked Change button...")
                     return
             except Exception:
                 pass
 
-        # Fallback terakhir: tombol pertama di .input-group
         try:
             btns = driver.find_elements(By.CSS_SELECTOR,
                 ".modal .input-group button, .modal button.btn-default")
             if btns:
                 self._js_click(driver, btns[0])
-                self._log("Clicked Change button (fallback first btn)...")
+                self._log("Clicked Change button (fallback)...")
                 return
         except Exception:
             pass
@@ -441,15 +382,8 @@ class MailtickingClient:
         self._log("Change button not found", "WARNING")
 
     def _click_activate(self, driver):
-        """Klik tombol Activate (tombol kuning/orange besar di bawah modal)."""
-        ACTIVATE_SELECTORS = [
-            # Selector spesifik tombol Activate mailticking
-            ".modal .btn-warning",
-            ".modal .btn-success",
-            ".modal .btn-primary",
-            ".modal button.btn",
-        ]
-        for sel in ACTIVATE_SELECTORS:
+        for sel in [".modal .btn-warning", ".modal .btn-success",
+                    ".modal .btn-primary", ".modal button.btn"]:
             try:
                 els = driver.find_elements(By.CSS_SELECTOR, sel)
                 for el in els:
@@ -460,7 +394,6 @@ class MailtickingClient:
             except Exception:
                 pass
 
-        # Fallback: semua button berisi teks Activate
         for btn in driver.find_elements(By.TAG_NAME, "button"):
             try:
                 if "activat" in btn.text.lower() and btn.is_displayed():
@@ -470,13 +403,11 @@ class MailtickingClient:
             except Exception:
                 pass
 
-        # Fallback XPATH
         try:
             el = driver.find_element(By.XPATH,
                 "//button[contains("
                 "translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')"
-                ",'activat')]"
-            )
+                ",'activat')]")
             self._js_click(driver, el)
             self._log("Clicked Activate button...")
             return
@@ -486,7 +417,6 @@ class MailtickingClient:
         self._log("Activate button not found", "WARNING")
 
     def _wait_modal_closed(self, driver, timeout: int = 10):
-        """Tunggu modal hilang setelah Activate diklik."""
         try:
             WebDriverWait(driver, timeout).until(
                 EC.invisibility_of_element_located(
@@ -495,11 +425,10 @@ class MailtickingClient:
             )
             self._log("Email activated successfully.")
         except TimeoutException:
-            # Mungkin modal langsung hilang atau pakai class berbeda
             time.sleep(random.uniform(2, 3))
             self._log("Email activated successfully.")
 
-    # ── Inbox polling ───────────────────────────────────────────────────
+    # -- Inbox polling --------------------------------------------------------
     def wait_for_verification_email(
         self,
         driver,
@@ -514,12 +443,10 @@ class MailtickingClient:
         start = time.time()
         while time.time() - start < timeout:
             try:
-                # Klik Refresh button di sidebar kiri mailticking
                 try:
                     refresh_btn = driver.find_element(By.CSS_SELECTOR,
                         ".refresh-btn, [onclick*='refresh'], #refresh,"
-                        ".sidebar .refresh, .nav-icon[title*='efresh']"
-                    )
+                        ".sidebar .refresh, .nav-icon[title*='efresh']")
                     self._js_click(driver, refresh_btn)
                 except Exception:
                     driver.refresh()
@@ -536,7 +463,6 @@ class MailtickingClient:
                 except Exception:
                     pass
 
-                # Cari email di inbox
                 rows = driver.find_elements(By.CSS_SELECTOR,
                     ".mail-item, .inbox-item, tr[onclick], "
                     "[class*='email-row'], [class*='message-row'], "
@@ -545,8 +471,7 @@ class MailtickingClient:
                 for row in rows:
                     txt = (row.text or "").lower()
                     if any(k in txt for k in [
-                        "gemini", "google", "verification", "verify",
-                        "noreply", "code"
+                        "gemini", "google", "verification", "verify", "noreply", "code"
                     ]):
                         self._log("Verification email found!")
                         return True
@@ -568,7 +493,6 @@ class MailtickingClient:
         self._log("Extracting verification code from email...")
         driver.switch_to.window(mail_tab_handle)
 
-        # Klik email Gemini/Google
         try:
             rows = driver.find_elements(By.CSS_SELECTOR,
                 ".mail-item, .inbox-item, tr[onclick], "
@@ -586,7 +510,6 @@ class MailtickingClient:
 
         time.sleep(random.uniform(1, 2))
 
-        # Masuk iframe email body
         html_content = ""
         try:
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
@@ -594,8 +517,7 @@ class MailtickingClient:
                 try:
                     driver.switch_to.frame(iframe)
                     content = driver.page_source
-                    if any(k in content.lower() for k in
-                           ["verification", "code", "gemini"]):
+                    if any(k in content.lower() for k in ["verification", "code", "gemini"]):
                         html_content = content
                         self._log("Switched to email iframe.")
                         break
