@@ -15,22 +15,27 @@ Otomasi mailticking.com sesuai tampilan nyata:
   |          [Activate]                     |
   +------------------------------------------+
 
-  Setelah Activate, inbox tampil:
+  Setelah Activate:
   +------------------------------------------+
   | [doalbon567@gongjua.com] [change v]      |
   | SENDER          | SUBJECT         | TIME |
   | noreply-google  | Gemini Enterp.. | 12:51|
-  |    [ Check emails ]                     |
+  | [ Check emails button ]                  |
   +------------------------------------------+
 
-Alur:
-  1. Tunggu modal muncul
-  2. Uncheck semua KECUALI abc@googlemail.com
-  3. Klik Change -> email baru
-  4. Klik Activate -> modal tutup
-  5. Poll inbox: klik 'Check emails' -> cek table row
-  6. Klik row 'Gemini Enterprise verification code'
-  7. Ekstrak OTP dari halaman/iframe yang terbuka
+EXACT ELEMENTS dari inspect:
+  Checkbox googlemail:
+    <input class="form-check-input type" type="checkbox" name="type" id="type3" value="3" checked="">
+    <label class="form-check-label" for="type3">abc@googlemail.com</label>
+
+  Activate button:
+    <a href="javascript:;" class="btn btn-warning mx-auto btn-lg activeBtn">
+
+  Email link di inbox:
+    <a href="/mail/view/{hash}/" rel="nofollow">Gemini Enterprise verification code</a>
+
+  OTP span:
+    <span class="verification-code" style="font-size:28px;...color:#1c3a70;...background-color:#eaf2ff;">
 """
 import re
 import time
@@ -55,7 +60,7 @@ MAILTICKING_URL = "https://mailticking.com"
 OTP_BG_COLORS = {"#eaf2ff", "#e8f0fe", "#f1f8ff", "#e3f2fd", "#f0f4ff", "#dce8fc"}
 OTP_TEXT_COLORS = {
     "#1c3a70", "#1a73e8", "#4285f4", "#1558d6", "#1967d2",
-    "#185abc", "#174ea6", "#0d47a1", "rgb(28,58,112)", "rgb(66,133,244)"
+    "#185abc", "#174ea6", "#0d47a1",
 }
 
 
@@ -64,6 +69,12 @@ def _extract_otp_from_html(html: str) -> Optional[str]:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
         return None
+
+    # Prioritas 1: span.verification-code (exact class dari inspect)
+    for tag in soup.find_all("span", class_="verification-code"):
+        text = re.sub(r'\s+', '', tag.get_text(strip=True))
+        if re.fullmatch(r'[A-Z0-9]{4,8}', text, re.IGNORECASE):
+            return text.upper()
 
     def _n(s):
         return s.lower().replace(" ", "").strip()
@@ -88,12 +99,14 @@ def _extract_otp_from_html(html: str) -> Optional[str]:
             return True
         return False
 
+    # Prioritas 2: tag dengan style OTP
     for tag in soup.find_all(True):
         if _is_otp_tag(tag):
             text = re.sub(r'\s+', '', tag.get_text(strip=True))
             if re.fullmatch(r'[A-Z0-9]{4,8}', text, re.IGNORECASE):
                 return text.upper()
 
+    # Prioritas 3: tag standalone
     STANDALONE = ["td", "div", "span", "p", "b", "strong", "h1", "h2", "h3"]
     SKIP_WORDS = {
         "THIS", "THAT", "FROM", "WITH", "YOUR", "EMAIL", "ALIAS",
@@ -107,12 +120,13 @@ def _extract_otp_from_html(html: str) -> Optional[str]:
             if code not in SKIP_WORDS:
                 return code
 
+    # Prioritas 4: regex di plain text
     plain = soup.get_text(separator=" ")
     patterns = [
         r'(?:verification|one-time)\s+code[^A-Z0-9]{0,20}([A-Z0-9]{4,8})\b',
         r'Your\s+code\s+is[:\s]+([A-Z0-9]{4,8})\b',
         r'\b([0-9]{6})\b',
-        r'\b([0-9]{4,8})\b',
+        r'\b([A-Z0-9]{6})\b',
     ]
     FALSE_YEARS = {str(y) for y in range(2018, 2032)}
     FOOTER_CTX  = ["copyright", "\u00a9", "google llc", "mountain view", "privacy", "terms"]
@@ -159,22 +173,25 @@ class MailtickingClient:
                     StaleElementReferenceException):
                 time.sleep(0.3)
 
-    def _wait_for_modal(self, driver, timeout: int = 10) -> bool:
+    def _wait_for_modal(self, driver, timeout: int = 15) -> bool:
+        """Tunggu modal 'Your Temp Email is Ready' - cek Activate button muncul."""
         try:
             WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "a.activeBtn, .activeBtn"))
+            )
+            return True
+        except TimeoutException:
+            pass
+        try:
+            WebDriverWait(driver, 5).until(
                 EC.visibility_of_element_located(
                     (By.CSS_SELECTOR, ".modal.show, .modal.in, .modal[style*='display: block']"))
             )
             return True
         except TimeoutException:
             pass
-        try:
-            els = driver.find_elements(By.XPATH,
-                "//button[contains(translate(.,"
-                "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'activate')]")
-            return any(el.is_displayed() for el in els)
-        except Exception:
-            return False
+        return False
 
     # -------------------------------------------------------------------------
     def open_mailticking_tab(self, driver) -> str:
@@ -184,7 +201,7 @@ class MailtickingClient:
         driver.switch_to.window(driver.window_handles[-1])
         driver.get(MAILTICKING_URL)
         try:
-            WebDriverWait(driver, 15).until(
+            WebDriverWait(driver, 20).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body")))
         except Exception:
             pass
@@ -194,37 +211,54 @@ class MailtickingClient:
 
     # -------------------------------------------------------------------------
     def get_fresh_email(self, driver) -> str:
-        modal_found = self._wait_for_modal(driver, timeout=8)
+        """
+        Step 4-6:
+          4. Uncheck semua KECUALI input#type3 (abc@googlemail.com)
+          5. Klik a.activeBtn (Activate)
+          6. Tunggu halaman reload -> baca email dari input bar
+        """
+        modal_found = self._wait_for_modal(driver, timeout=12)
         if modal_found:
             self._log("Modal 'Your Temp Email is Ready' detected.")
         else:
             self._log("Modal not detected, proceeding anyway...", "WARNING")
 
+        # Step 4: configure checkboxes
         self._configure_checkboxes(driver)
         time.sleep(0.5)
 
+        # Baca email sebelum activate
         old_email = self._read_current_email(driver)
-        self._log(f"Current email: {old_email}")
+        self._log(f"Current email before activate: {old_email}")
 
-        self._click_change(driver)
-        time.sleep(random.uniform(1.5, 2.5))
-
-        new_email = self._read_current_email(driver)
-        self._log(f"New email obtained: {new_email}" if new_email else "Could not read new email")
-
+        # Step 5: klik Activate
         self._click_activate(driver)
-        self._wait_modal_closed(driver)
 
-        # Setelah modal tutup, baca email dari navbar input
-        final_email = self._read_email_from_navbar(driver) or new_email or old_email
+        # Step 6: tunggu halaman reload otomatis
+        self._log("Waiting for page to reload after Activate...")
+        time.sleep(random.uniform(3, 5))
+
+        # Baca email aktif dari navbar input bar atas
+        final_email = self._read_email_from_navbar(driver) or old_email
         self._log(f"Temp email obtained: {final_email}")
         return final_email
 
     # -------------------------------------------------------------------------
     def _configure_checkboxes(self, driver):
-        """HANYA centang abc@googlemail.com, uncheck semua yang lain."""
+        """
+        EXACT dari inspect element:
+          <input class="form-check-input type" type="checkbox" name="type" id="type3" value="3">
+          -> ini adalah abc@googlemail.com, HARUS checked
+
+          Semua checkbox lain (name="type", id != type3) -> HARUS unchecked
+        """
         try:
-            checkboxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+            checkboxes = driver.find_elements(
+                By.CSS_SELECTOR, "input[type='checkbox'][name='type']")
+            if not checkboxes:
+                # Fallback ke semua checkbox
+                checkboxes = driver.find_elements(
+                    By.CSS_SELECTOR, "input[type='checkbox']")
             if not checkboxes:
                 self._log("No checkboxes found in modal", "WARNING")
                 return
@@ -234,16 +268,13 @@ class MailtickingClient:
                     cb_id    = cb.get_attribute("id") or ""
                     cb_value = (cb.get_attribute("value") or "").lower()
                     cb_name  = (cb.get_attribute("name")  or "").lower()
+
+                    # Cek label text
                     label_text = ""
                     if cb_id:
                         try:
-                            lbl = driver.find_element(By.XPATH, f"//label[@for='{cb_id}']")
-                            label_text = lbl.text.lower()
-                        except Exception:
-                            pass
-                    if not label_text:
-                        try:
-                            lbl = cb.find_element(By.XPATH, "./ancestor::label")
+                            lbl = driver.find_element(
+                                By.XPATH, f"//label[@for='{cb_id}']")
                             label_text = lbl.text.lower()
                         except Exception:
                             pass
@@ -254,14 +285,18 @@ class MailtickingClient:
                         except Exception:
                             pass
 
-                    combined = label_text + cb_value + cb_name
-                    is_googlemail = "googlemail" in combined
+                    combined = label_text + cb_value + cb_name + cb_id
+
+                    # id="type3" atau label mengandung "googlemail" -> CHECKED
+                    is_googlemail = (cb_id == "type3") or ("googlemail" in combined)
+
                     currently_checked = cb.is_selected()
 
                     if is_googlemail:
                         if not currently_checked:
                             self._js_click(driver, cb)
                             time.sleep(0.2)
+                            self._log("Checked: abc@googlemail.com")
                     else:
                         if currently_checked:
                             self._js_click(driver, cb)
@@ -272,7 +307,7 @@ class MailtickingClient:
                 except Exception:
                     continue
 
-            self._log("Gmail format checkboxes unchecked")
+            self._log("Checkboxes configured: only googlemail.com selected")
         except Exception as e:
             self._log(f"Checkbox config error: {e}", "WARNING")
 
@@ -294,8 +329,8 @@ class MailtickingClient:
 
     def _read_email_from_navbar(self, driver) -> str:
         """
-        Setelah modal tutup, email aktif tampil di input bar atas:
-          [doalbon567@gongjua.com] [change v]
+        Setelah modal/activate, email aktif tampil di input bar atas.
+        Coba berbagai selector.
         """
         for sel in [
             "input[type='text']", "input[type='email']",
@@ -310,7 +345,6 @@ class MailtickingClient:
                     return val.strip()
             except Exception:
                 pass
-        # Fallback: regex value di page source
         try:
             src = driver.page_source
             m = re.search(
@@ -321,132 +355,90 @@ class MailtickingClient:
             pass
         return ""
 
-    def _click_change(self, driver):
-        for sel in [".input-group-btn button", ".input-group button", "button.btn-default"]:
+    def _click_activate(self, driver):
+        """
+        EXACT dari inspect:
+          <a href="javascript:;" class="btn btn-warning mx-auto btn-lg activeBtn">
+        """
+        # Selector exact
+        for sel in [
+            "a.activeBtn",
+            "a.btn-warning.activeBtn",
+            ".activeBtn",
+            "a.btn.btn-warning.btn-lg",
+        ]:
             try:
                 el = driver.find_element(By.CSS_SELECTOR, sel)
                 if el.is_displayed():
                     self._js_click(driver, el)
-                    self._log("Clicked Change button...")
+                    self._log("Clicked Activate button (a.activeBtn)")
                     return
             except Exception:
                 pass
-        for btn in driver.find_elements(By.TAG_NAME, "button"):
-            try:
-                txt = (btn.text or "").lower().strip()
-                if "change" in txt or (btn.get_attribute("title") or "").lower() == "change":
-                    self._js_click(driver, btn)
-                    self._log("Clicked Change button...")
-                    return
-            except Exception:
-                pass
-        try:
-            btns = driver.find_elements(By.CSS_SELECTOR,
-                ".modal .input-group button, .modal button.btn-default")
-            if btns:
-                self._js_click(driver, btns[0])
-                self._log("Clicked Change button (fallback)...")
-                return
-        except Exception:
-            pass
-        self._log("Change button not found", "WARNING")
 
-    def _click_activate(self, driver):
-        for sel in [".modal .btn-warning", ".modal .btn-success",
-                    ".modal .btn-primary", ".modal button.btn"]:
-            try:
-                els = driver.find_elements(By.CSS_SELECTOR, sel)
-                for el in els:
-                    if el.is_displayed() and "activat" in el.text.lower():
+        # Fallback: cari semua a/button dengan teks 'activate'
+        for tag in ["a", "button"]:
+            for el in driver.find_elements(By.TAG_NAME, tag):
+                try:
+                    if "activat" in el.text.lower() and el.is_displayed():
                         self._js_click(driver, el)
-                        self._log("Clicked Activate button...")
+                        self._log(f"Clicked Activate button (fallback {tag})")
                         return
-            except Exception:
-                pass
-        for btn in driver.find_elements(By.TAG_NAME, "button"):
-            try:
-                if "activat" in btn.text.lower() and btn.is_displayed():
-                    self._js_click(driver, btn)
-                    self._log("Clicked Activate button...")
-                    return
-            except Exception:
-                pass
-        try:
-            el = driver.find_element(By.XPATH,
-                "//button[contains("
-                "translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')"
-                ",'activat')]")
-            self._js_click(driver, el)
-            self._log("Clicked Activate button...")
-            return
-        except Exception:
-            pass
+                except Exception:
+                    pass
         self._log("Activate button not found", "WARNING")
 
-    def _wait_modal_closed(self, driver, timeout: int = 10):
-        try:
-            WebDriverWait(driver, timeout).until(
-                EC.invisibility_of_element_located(
-                    (By.CSS_SELECTOR, ".modal.show, .modal.in")))
-            self._log("Email activated successfully.")
-        except TimeoutException:
-            time.sleep(random.uniform(2, 3))
-            self._log("Email activated successfully.")
-
-    def _click_check_emails(self, driver):
+    def _click_check_emails(self, driver) -> bool:
         """
-        Klik tombol 'Check emails' di halaman inbox mailticking.
-        Tombol ini adalah cara refresh inbox sesuai screenshot.
+        Klik tombol 'Check emails' di halaman inbox.
+        Step 11 dari alur.
         """
-        try:
-            # Cari tombol dengan teks 'check emails'
-            el = driver.find_element(By.XPATH,
-                "//button[contains("
-                "translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')"
-                ",'check email')]"
-            )
-            self._js_click(driver, el)
-            return True
-        except Exception:
-            pass
-        # Fallback: cari link/a teks 'check email'
-        try:
-            el = driver.find_element(By.XPATH,
-                "//a[contains("
-                "translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')"
-                ",'check email')]"
-            )
-            self._js_click(driver, el)
-            return True
-        except Exception:
-            pass
+        for tag in ["button", "a"]:
+            for el in driver.find_elements(By.TAG_NAME, tag):
+                try:
+                    txt = (el.text or "").lower()
+                    if "check email" in txt and el.is_displayed():
+                        self._js_click(driver, el)
+                        return True
+                except Exception:
+                    pass
         return False
 
     def _find_gemini_row(self, driver):
         """
-        Cari baris email 'Gemini Enterprise verification code' di tabel inbox.
-        Sesuai screenshot: table dengan kolom SENDER, SUBJECT, TIME.
-        Return element row jika ditemukan, None jika tidak.
+        Cari link email Gemini di inbox.
+        EXACT dari inspect:
+          <a href="/mail/view/{hash}/" rel="nofollow">Gemini Enterprise verification code</a>
         """
+        # Selector paling akurat: link dengan href /mail/view/
+        try:
+            links = driver.find_elements(
+                By.CSS_SELECTOR, "a[href*='/mail/view/']"
+            )
+            for link in links:
+                txt = (link.text or "").lower()
+                if any(k in txt for k in ["gemini", "verification", "enterprise"]):
+                    return link
+            # Jika ada link /mail/view/ apapun, ambil yang pertama
+            if links:
+                return links[0]
+        except Exception:
+            pass
+
+        # Fallback: baris tabel
         KEYWORDS = ["gemini", "verification code", "enterprise", "noreply-googlecloud"]
-        # Cari di tbody tr (struktur tabel mailticking)
         try:
             rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
             for row in rows:
-                txt = (row.text or "").lower()
-                if any(k in txt for k in KEYWORDS):
+                if any(k in (row.text or "").lower() for k in KEYWORDS):
                     return row
         except Exception:
             pass
-        # Fallback: semua elemen clickable di inbox
         try:
-            for sel in [".mail-item", ".inbox-item", "tr[onclick]",
-                        "[class*='email-row']", ".list-group-item"]:
-                rows = driver.find_elements(By.CSS_SELECTOR, sel)
-                for row in rows:
-                    txt = (row.text or "").lower()
-                    if any(k in txt for k in KEYWORDS):
-                        return row
+            for sel in [".mail-item", ".inbox-item", "tr[onclick]", ".list-group-item"]:
+                for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                    if any(k in (el.text or "").lower() for k in KEYWORDS):
+                        return el
         except Exception:
             pass
         return None
@@ -460,11 +452,9 @@ class MailtickingClient:
         timeout:           int = 90,
     ) -> bool:
         """
-        Poll inbox mailticking:
-        1. Switch ke tab mailticking
-        2. Klik 'Check emails' (bukan browser refresh)
-        3. Cek tabel inbox - ada row 'Gemini Enterprise verification code'?
-        4. Ulangi sampai timeout
+        Step 10-11:
+          10. Kembali ke tab mailticking
+          11. Reload halaman (browser refresh) untuk cek pesan baru
         """
         self._log("Checking inbox for verification email...")
         driver.switch_to.window(mail_tab_handle)
@@ -473,28 +463,28 @@ class MailtickingClient:
         start = time.time()
         while time.time() - start < timeout:
             try:
-                # Klik 'Check emails' untuk refresh inbox
-                clicked = self._click_check_emails(driver)
-                if not clicked:
-                    # Fallback ke browser refresh jika tombol tidak ketemu
-                    driver.refresh()
-                    try:
-                        WebDriverWait(driver, 8).until(
-                            EC.presence_of_element_located((By.TAG_NAME, "body")))
-                    except Exception:
-                        pass
-                    # Dismiss modal jika muncul lagi setelah refresh
-                    try:
-                        modal_els = driver.find_elements(By.CSS_SELECTOR,
-                            ".modal.show, .modal.in, .modal[style*='display: block']")
-                        if any(el.is_displayed() for el in modal_els):
-                            self._click_activate(driver)
-                            time.sleep(1.5)
-                    except Exception:
-                        pass
-
+                # Step 11: reload halaman
+                driver.refresh()
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.TAG_NAME, "body")))
+                except Exception:
+                    pass
                 time.sleep(random.uniform(2, 3))
 
+                # Jika modal muncul lagi setelah refresh, dismiss
+                try:
+                    act_btn = driver.find_elements(By.CSS_SELECTOR, "a.activeBtn, .activeBtn")
+                    if any(b.is_displayed() for b in act_btn):
+                        for b in act_btn:
+                            if b.is_displayed():
+                                self._js_click(driver, b)
+                                time.sleep(1.5)
+                                break
+                except Exception:
+                    pass
+
+                # Cek apakah ada link email Gemini
                 row = self._find_gemini_row(driver)
                 if row:
                     self._log("Verification email found!")
@@ -517,26 +507,45 @@ class MailtickingClient:
         mail_tab_handle: str,
     ) -> Optional[str]:
         """
-        1. Switch ke tab mailticking
-        2. Cari row 'Gemini Enterprise verification code'
-        3. Klik row tersebut -> halaman email terbuka
-        4. Cari OTP di konten halaman / iframe
+        Step 12-13:
+          12. Klik link 'Gemini Enterprise verification code'
+              EXACT: <a href="/mail/view/{hash}/" rel="nofollow">...
+          13. Tunggu halaman load -> cari span.verification-code
         """
         self._log("Extracting verification code from email...")
         driver.switch_to.window(mail_tab_handle)
 
-        # Klik baris email di tabel
+        # Step 12: klik link email
         row = self._find_gemini_row(driver)
         if row:
             self._js_click(driver, row)
-            self._log("Opened verification email.")
-            time.sleep(random.uniform(2.5, 3.5))
+            self._log("Clicked 'Gemini Enterprise verification code' link")
+            # Tunggu halaman email loading
+            try:
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "span.verification-code, .verification-code"))
+                )
+            except TimeoutException:
+                pass
+            time.sleep(random.uniform(2, 3))
         else:
-            self._log("Could not find Gemini email row", "WARNING")
+            self._log("Could not find Gemini email link", "WARNING")
+            time.sleep(2)
 
-        time.sleep(random.uniform(1, 1.5))
+        # Step 13: cari OTP
+        # Prioritas: span.verification-code (exact dari inspect)
+        try:
+            otp_el = driver.find_element(
+                By.CSS_SELECTOR, "span.verification-code")
+            otp = otp_el.text.strip()
+            if re.fullmatch(r'[A-Z0-9]{4,8}', otp, re.IGNORECASE):
+                self._log(f"Verification code extracted (span.verification-code): {otp.upper()}")
+                return otp.upper()
+        except Exception:
+            pass
 
-        # Coba masuk iframe email body (mailticking render email di iframe)
+        # Fallback: parse seluruh page source
         html_content = ""
         try:
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
@@ -558,7 +567,6 @@ class MailtickingClient:
         if not html_content:
             driver.switch_to.default_content()
             html_content = driver.page_source
-
         driver.switch_to.default_content()
 
         otp = _extract_otp_from_html(html_content)
