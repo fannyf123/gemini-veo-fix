@@ -1,0 +1,6 @@
+chromedriver.exe
+OUTPUT_GEMINI/
+__pycache__/
+*.pyc
+DEBUG/
+.venv/

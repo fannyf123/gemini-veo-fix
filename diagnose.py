@@ -36,7 +36,12 @@ else:
 # ── 2. Playwright ──────────────────────────────────────────────────
 try:
     import playwright
-    print(f"{PASS} playwright terinstall: {playwright.__version__}")
+    try:
+        pw_ver = playwright.__version__
+    except AttributeError:
+        from importlib.metadata import version as pkg_version
+        pw_ver = pkg_version("playwright")
+    print(f"{PASS} playwright terinstall: {pw_ver}")
 except ImportError:
     print(f"{FAIL} playwright TIDAK terinstall")
     print(f"       Jalankan: pip install playwright && playwright install")

@@ -29,9 +29,10 @@ OUTPUT_DIR   = os.path.join(_ROOT, "OUTPUT_GEMINI")
 def load_config() -> dict:
     default = {
         "output_dir": OUTPUT_DIR,
-        "headless":   False,
+        "headless":   True,
         "delay":      5,
         "retry":      1,
+        "stealth":    True,
     }
     if os.path.exists(CONFIG_PATH):
         try:

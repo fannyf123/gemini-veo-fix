@@ -257,7 +257,7 @@ class MailtickingClient:
 
         # Tunggu halaman reload
         self._log("Waiting for page to reload after Activate...")
-        time.sleep(random.uniform(3, 5))
+        time.sleep(random.uniform(1.5, 2))
 
         # Baca email aktif dari navbar
         final_email = self._read_email_from_navbar(driver) or email
@@ -533,11 +533,11 @@ class MailtickingClient:
             try:
                 driver.refresh()
                 try:
-                    WebDriverWait(driver, 10).until(
+                    WebDriverWait(driver, 5).until(
                         EC.presence_of_element_located((By.TAG_NAME, "body")))
                 except Exception:
                     pass
-                time.sleep(random.uniform(2, 3))
+                time.sleep(random.uniform(0.8, 1.2))
 
                 try:
                     act_btns = driver.find_elements(
@@ -547,7 +547,7 @@ class MailtickingClient:
                     for b in act_btns:
                         if b.is_displayed():
                             self._js_click(driver, b)
-                            time.sleep(1.5)
+                            time.sleep(0.5)
                             break
                 except Exception:
                     pass
@@ -563,7 +563,7 @@ class MailtickingClient:
             elapsed = int(time.time() - start)
             if elapsed > 0 and elapsed % 10 < 3:
                 self._log(f"Waiting for email... ({elapsed}s)")
-            time.sleep(3)
+            time.sleep(1.5)
 
         return False
 
