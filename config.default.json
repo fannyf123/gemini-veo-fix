@@ -1,7 +1,5 @@
 {
-  "relay_api_key": "",
-  "output_dir": "",
   "headless": false,
-  "max_workers": 1,
-  "batch_stagger_delay": 15
+  "delay": 5,
+  "retry": 1
 }

@@ -2,92 +2,97 @@
 gemini_enterprise.py
 
 Otomasi generate video di business.gemini.google
-Menggunakan undetected-chromedriver (UC) + fresh temp profile.
+Menggunakan selenium-stealth (regular Chrome) + fresh temp profile.
 
-Fix:
-    - Tiap login pakai email mask BARU dari Firefox Relay
-    - Mask lama dihapus otomatis setelah selesai/gagal
-    - OTP diambil dari pesan TERBARU (sort internalDate desc)
-    - Setelah OTP submit, deteksi OTP salah/invalid lalu retry
-    - Jika relay_config.json tidak ada, fallback ke mask_email dari config
+Alur lengkap:
+  Step 1 : Buka mailticking.com → dapat email temp baru
+  Step 2 : Register di Gemini Business dengan email temp
+  Step 3 : Tunggu email verifikasi di mailticking
+  Step 4 : Ekstrak kode verifikasi dari email
+  Step 5 : Masukkan kode verifikasi
+  Step 6 : Selesaikan signup (isi nama, klik Agree)
+  Step 7 : Initial setup (tutup dialog, pilih Veo)
+  Lanjut : Process prompts satu per satu
+  Rate limit: auto switch account
 """
-
 import os
-import sys
 import re
+import sys
 import json
 import time
 import random
 import shutil
+import string
 import tempfile
 import threading
 import subprocess
 from typing import Optional, Callable
 
 try:
-    import undetected_chromedriver as uc
-except ImportError:
-    uc = None
-
-try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.common.exceptions import TimeoutException, WebDriverException
+    from selenium.webdriver.common.action_chains import ActionChains
+    from selenium.webdriver.common.keys import Keys
 except ImportError:
     pass
 
-from App.gmail_otp import GmailOTPReader
-from App.firefox_relay import FirefoxRelay
+try:
+    from selenium_stealth import stealth
+except ImportError:
+    stealth = None
 
-GEMINI_HOME_URL   = "https://business.gemini.google/"
+from App.mailticking import MailtickingClient
 
-OTP_TIMEOUT       = 120
+GEMINI_HOME_URL  = "https://business.gemini.google/"
+GEMINI_LOGIN_URL = "https://gemini.google.com/corp/signin"
+
+OTP_TIMEOUT      = 90
 VIDEO_GEN_TIMEOUT = 600
 POLLING_INTERVAL  = 8
-MAX_OTP_RETRY     = 3
-MAX_LOGIN_RETRY   = 4
+MAX_ACCOUNT_RETRY = 3
+MAX_TAB_RETRY     = 3
+
+# Thinking disappears < 5s → rate limit
+RATE_LIMIT_THINKING_THRESHOLD = 5.0
 
 CHROME_PATHS = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
     os.path.expanduser(r"~\AppData\Local\Google\Chrome\Application\chrome.exe"),
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium-browser",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 ]
 
-EMAIL_SELECTORS = [
-    "input[name='loginHint']",
-    "input[id='email-input']",
-    "input[jsname='YPqjbf']",
-    "input[type='email']",
-    "input[name='email']",
-    "input[autocomplete='email']",
-    "input[type='text']",
+# Nama acak untuk signup
+FIRST_NAMES = [
+    "Tyler", "Jordan", "Casey", "Morgan", "Avery", "Riley", "Quinn",
+    "Parker", "Hayden", "Blake", "Drew", "Reese", "Sage", "Cameron",
+    "Alex", "Rowan", "Jamie", "Skyler", "Logan", "Peyton",
+]
+LAST_NAMES = [
+    "Miller", "Clark", "Davis", "Wilson", "Moore", "Taylor", "Anderson",
+    "Thomas", "Jackson", "White", "Harris", "Martin", "Thompson", "Garcia",
+    "Martinez", "Robinson", "Lewis", "Lee", "Walker", "Hall",
 ]
 
-SUBMIT_SELECTORS = [
-    "button[type='submit']",
-    "button",
-]
-
-# Keywords yang menandakan OTP salah/expired di halaman Google
+# OTP error keywords di halaman Google
 OTP_ERROR_KEYWORDS = [
-    "wrong code",
-    "incorrect code",
-    "invalid code",
-    "code expired",
-    "code has expired",
-    "didn't match",
-    "try again",
-    "kode salah",
-    "kode tidak valid",
-    "kode sudah kadaluarsa",
-    "that code didn't work",
-    "code doesn't match",
-    "please check",
+    "wrong code", "incorrect code", "invalid code",
+    "code expired", "didn't match", "try again",
+    "that code didn't work", "please check",
 ]
 
 
-# ── Chrome version detection ─────────────────────────────────────────────
+def _random_name() -> str:
+    return f"{random.choice(FIRST_NAMES)} {random.choice(LAST_NAMES)}"
+
+
 def _get_chrome_version() -> Optional[int]:
     try:
         import winreg
@@ -115,38 +120,163 @@ def _get_chrome_version() -> Optional[int]:
     return None
 
 
+def _get_chrome_full_version() -> Optional[str]:
+    for path in CHROME_PATHS:
+        if os.path.exists(path):
+            try:
+                r = subprocess.run([path, "--version"],
+                    capture_output=True, text=True, timeout=5)
+                m = re.search(r"([\d.]+)", r.stdout)
+                if m:
+                    return m.group(1)
+            except Exception:
+                pass
+    return None
+
+
+def _setup_chromedriver(base_dir: str, log_fn: Callable) -> Optional[str]:
+    """
+    Cek / download ChromeDriver yang cocok dengan versi Chrome terinstal.
+    Return path ke chromedriver executable.
+    """
+    log_fn("Checking ChromeDriver compatibility...")
+    chrome_major = _get_chrome_version()
+    chrome_full  = _get_chrome_full_version()
+
+    if chrome_major:
+        log_fn(f"Detected Chrome version: {chrome_major}")
+    else:
+        log_fn("Could not detect Chrome version", "WARNING")
+
+    # Cek lokal dulu
+    local_paths = [
+        os.path.join(base_dir, "chromedriver.exe"),
+        os.path.join(base_dir, "chromedriver"),
+        "chromedriver.exe",
+        "chromedriver",
+    ]
+    for path in local_paths:
+        if os.path.exists(path):
+            # Cek versinya
+            try:
+                r = subprocess.run([path, "--version"],
+                    capture_output=True, text=True, timeout=5)
+                m = re.search(r"(\d+)\.\d+\.\d+", r.stdout)
+                if m and chrome_major and int(m.group(1)) == chrome_major:
+                    log_fn(f"Local ChromeDriver version: {m.group(1)}")
+                    log_fn("ChromeDriver version matches browser.")
+                    return path
+                elif m:
+                    log_fn(f"Local ChromeDriver v{m.group(1)} != Chrome v{chrome_major}, updating...")
+            except Exception:
+                pass
+
+    log_fn("No ChromeDriver found locally.")
+    log_fn("Downloading ChromeDriver matching browser version...")
+
+    if not chrome_full or not chrome_major:
+        log_fn("Cannot auto-download ChromeDriver: Chrome version unknown", "WARNING")
+        return None
+
+    log_fn(f"Browser version: {chrome_full} (Major: {chrome_major})")
+
+    try:
+        import urllib.request
+        import zipfile
+        import io
+
+        log_fn("Fetching ChromeDriver versions from Chrome for Testing API...")
+        api_url = "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json"
+        with urllib.request.urlopen(api_url, timeout=15) as resp:
+            data = json.loads(resp.read())
+
+        # Cari versi yang cocok (major match, ambil terbaru)
+        best = None
+        for entry in data.get("versions", []):
+            v = entry.get("version", "")
+            if v.startswith(f"{chrome_major}."):
+                # Pastikan ada download chromedriver win64
+                dls = entry.get("downloads", {}).get("chromedriver", [])
+                for dl in dls:
+                    if "win64" in dl.get("platform", "") or "win32" in dl.get("platform", ""):
+                        best = (v, dl["url"])
+                        break
+
+        if not best:
+            # Fallback: linux64
+            for entry in data.get("versions", []):
+                v = entry.get("version", "")
+                if v.startswith(f"{chrome_major}."):
+                    dls = entry.get("downloads", {}).get("chromedriver", [])
+                    if dls:
+                        best = (v, dls[0]["url"])
+                        break
+
+        if not best:
+            log_fn(f"No ChromeDriver found for Chrome {chrome_major}", "WARNING")
+            return None
+
+        ver, url = best
+        log_fn(f"Found matching ChromeDriver version: {ver}")
+        log_fn("Downloading ChromeDriver...")
+
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            data_zip = resp.read()
+
+        log_fn("Download complete. Extracting...")
+        with zipfile.ZipFile(io.BytesIO(data_zip)) as zf:
+            for name in zf.namelist():
+                if name.endswith("chromedriver.exe") or name.endswith("/chromedriver"):
+                    exe_data = zf.read(name)
+                    out_name = "chromedriver.exe" if sys.platform == "win32" else "chromedriver"
+                    out_path = os.path.join(base_dir, out_name)
+                    with open(out_path, "wb") as f:
+                        f.write(exe_data)
+                    if sys.platform != "win32":
+                        os.chmod(out_path, 0o755)
+                    log_fn("ChromeDriver saved to application directory.")
+                    log_fn("ChromeDriver setup complete!")
+                    return out_path
+
+    except Exception as e:
+        log_fn(f"ChromeDriver download failed: {e}", "WARNING")
+
+    return None
+
+
 class GeminiEnterpriseProcessor(threading.Thread):
+    """
+    Thread utama yang memproses batch prompts.
+    Mengelola satu browser + satu akun, auto-switch jika rate limit.
+    """
 
     def __init__(
         self,
         base_dir:          str,
-        prompt:            str,
-        mask_email:        str,
+        prompts:           list,        # list of str
         output_dir:        str,
         config:            dict,
         log_callback:      Optional[Callable] = None,
         progress_callback: Optional[Callable] = None,
         finished_callback: Optional[Callable] = None,
+        start_index:       int = 0,     # index prompt yang belum diproses
     ):
         super().__init__(daemon=True)
-        self.base_dir          = base_dir
-        self.prompt            = prompt
-        self.fallback_email    = mask_email
-        self.output_dir        = output_dir or os.path.join(base_dir, "OUTPUT_GEMINI")
-        self.config            = config
-        self.log_cb            = log_callback
-        self.progress_cb       = progress_callback
-        self.finished_cb       = finished_callback
-        self._cancelled        = False
-        self._otp_reader       = GmailOTPReader(base_dir)
-        self.debug_dir         = os.path.join(base_dir, "DEBUG")
-        self.session_file      = os.path.join(base_dir, "session", "gemini_session.json")
-        self._driver           = None
-        self._temp_profile     = None
-        self._current_mask_id  = None
-        self._current_mask_email = None
-        relay_key = FirefoxRelay.load_key(base_dir)
-        self._relay = FirefoxRelay(relay_key) if relay_key else None
+        self.base_dir       = base_dir
+        self.prompts        = prompts
+        self.output_dir     = output_dir or os.path.join(base_dir, "OUTPUT_GEMINI")
+        self.config         = config
+        self.log_cb         = log_callback
+        self.progress_cb    = progress_callback
+        self.finished_cb    = finished_callback
+        self.start_index    = start_index
+        self._cancelled     = False
+        self._driver        = None
+        self._temp_profile  = None
+        self._mail_tab      = None
+        self._gemini_tab    = None
+        self._mail_client   = MailtickingClient(log_callback=log_callback)
+        self.debug_dir      = os.path.join(base_dir, "DEBUG")
 
     def _log(self, msg, level="INFO"):
         if self.log_cb:
@@ -163,182 +293,90 @@ class GeminiEnterpriseProcessor(threading.Thread):
     def cancel(self):
         self._cancelled = True
 
-    # ── Email mask management ───────────────────────────────────────────────────
-    def _create_new_mask(self) -> str:
-        if self._relay:
-            try:
-                ts_label = f"gemini-veo-{int(time.time())}"
-                result = self._relay.create_mask(label=ts_label)
-                addr   = result.get("full_address", "")
-                mask_id = result.get("id")
-                if addr:
-                    self._current_mask_id    = mask_id
-                    self._current_mask_email = addr
-                    self._log(f"   📨 Mask baru: {addr} (id={mask_id})", "SUCCESS")
-                    return addr
-            except Exception as e:
-                self._log(f"   ⚠️  Gagal buat mask baru: {e} — pakai fallback", "WARNING")
-
-        self._current_mask_email = self.fallback_email
-        self._current_mask_id    = None
-        self._log(f"   📧 Fallback email: {self.fallback_email}", "WARNING")
-        return self.fallback_email
-
-    def _delete_current_mask(self):
-        if self._relay and self._current_mask_id:
-            try:
-                ok = self._relay.delete_mask(self._current_mask_id)
-                if ok:
-                    self._log(
-                        f"   🗑️  Mask {self._current_mask_email} dihapus (id={self._current_mask_id})",
-                        "WARNING"
-                    )
-                else:
-                    self._log(
-                        f"   ⚠️  Gagal hapus mask {self._current_mask_id}",
-                        "WARNING"
-                    )
-            except Exception as e:
-                self._log(f"   ⚠️  Delete mask error: {e}", "WARNING")
-            self._current_mask_id    = None
-            self._current_mask_email = None
-
-    # ── Debug ────────────────────────────────────────────────────────────
     def _debug_dump(self, driver, label: str):
         try:
             os.makedirs(self.debug_dir, exist_ok=True)
             ts = int(time.time())
             driver.save_screenshot(os.path.join(self.debug_dir, f"{label}_{ts}.png"))
-            with open(os.path.join(self.debug_dir, f"{label}_{ts}.html"), "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
         except Exception:
             pass
 
-    # ── UC Driver ──────────────────────────────────────────────────────────
+    # ── Driver setup ──────────────────────────────────────────────────────
     def _create_driver(self) -> Optional[object]:
-        if uc is None:
-            self._log("❌ undetected-chromedriver tidak terinstall!", "ERROR")
-            return None
+        self._log("Setting up fresh Chrome browser...")
 
-        chrome_ver = _get_chrome_version()
-        if chrome_ver:
-            self._log(f"   💻 Chrome versi: {chrome_ver}", "SUCCESS")
-        else:
-            self._log("⚠️  Versi Chrome tidak terdeteksi", "WARNING")
+        cd_path = _setup_chromedriver(self.base_dir, self._log)
 
-        self._temp_profile = tempfile.mkdtemp(prefix="gemini_uc_profile_")
-        self._log(f"   📂 Fresh profile: {self._temp_profile}")
+        self._temp_profile = tempfile.mkdtemp(prefix="gemini_profile_")
+        self._log("Using fresh browser profile")
 
         headless = self.config.get("headless", False)
 
-        options = uc.ChromeOptions()
-        options.add_argument(f"--user-data-dir={self._temp_profile}")
-        options.add_argument("--no-first-run")
-        options.add_argument("--no-default-browser-check")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--disable-infobars")
-        options.add_argument("--disable-extensions")
-        options.add_argument("--lang=en-US")
-        options.add_argument("--window-size=1280,900")
-        options.add_argument("--disable-popup-blocking")
-        options.add_experimental_option("prefs", {
-            "intl.accept_languages":     "en,en_US",
+        opts = Options()
+        opts.add_argument(f"--user-data-dir={self._temp_profile}")
+        opts.add_argument("--no-first-run")
+        opts.add_argument("--no-default-browser-check")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_argument("--disable-infobars")
+        opts.add_argument("--lang=en-US")
+        opts.add_argument("--window-size=1280,900")
+        opts.add_argument("--disable-popup-blocking")
+        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+        opts.add_experimental_option("useAutomationExtension", False)
+        opts.add_experimental_option("prefs", {
+            "intl.accept_languages": "en,en_US",
             "download.default_directory": self.output_dir,
             "download.prompt_for_download": False,
             "download.directory_upgrade": True,
-            "safebrowsing.enabled":       True,
+            "safebrowsing.enabled": True,
         })
         if headless:
-            options.add_argument("--headless=new")
+            opts.add_argument("--headless=new")
 
-        for ver in ([chrome_ver, None] if chrome_ver else [None]):
-            try:
-                ver_label = str(ver) if ver else "auto"
-                self._log(f"   → UC version_main={ver_label}...")
-                driver = uc.Chrome(options=options, use_subprocess=True, version_main=ver)
-                driver.execute_script(
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        try:
+            if cd_path:
+                svc    = Service(executable_path=cd_path)
+                driver = webdriver.Chrome(service=svc, options=opts)
+            else:
+                driver = webdriver.Chrome(options=opts)
+
+            if stealth:
+                stealth(driver,
+                    languages=["en-US", "en"],
+                    vendor="Google Inc.",
+                    platform="Win32",
+                    webgl_vendor="Intel Inc.",
+                    renderer="Intel Iris OpenGL Engine",
+                    fix_hairline=True,
                 )
-                self._log(f"✅ UC driver OK (version_main={ver_label})", "SUCCESS")
-                return driver
-            except Exception as e:
-                err = str(e)
-                self._log(f"   ⚠️  version_main={ver_label} gagal: {err[:100]}", "WARNING")
-                m = re.search(r"Current browser version is (\d+)", err)
-                if m:
-                    detected = int(m.group(1))
-                    self._log(f"   🔍 Retry version_main={detected} dari error msg...", "WARNING")
-                    try:
-                        driver2 = uc.Chrome(options=options, use_subprocess=True,
-                                            version_main=detected)
-                        driver2.execute_script(
-                            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-                        )
-                        self._log(f"✅ UC driver OK (version_main={detected})", "SUCCESS")
-                        return driver2
-                    except Exception as e2:
-                        self._log(f"   ❌ Retry {detected} gagal: {str(e2)[:80]}", "ERROR")
 
-        self._log("❌ Semua percobaan UC driver gagal.", "ERROR")
-        return None
+            driver.execute_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+
+            chrome_major = _get_chrome_version()
+            if chrome_major:
+                self._log(f"ChromeDriver matched with browser v{chrome_major}")
+            self._log("Chrome browser initialized")
+            return driver
+
+        except Exception as e:
+            self._log(f"Failed to create Chrome driver: {e}", "ERROR")
+            return None
 
     def _quit_driver(self, driver):
         try:
             if driver:
+                pid = driver.service.process.pid if hasattr(driver, 'service') else None
                 driver.quit()
+                if pid:
+                    self._log(f"Closed automation Chrome (PID: {pid})")
         except Exception:
             pass
         if self._temp_profile and os.path.exists(self._temp_profile):
             shutil.rmtree(self._temp_profile, ignore_errors=True)
-
-    # ── Session ──────────────────────────────────────────────────────────
-    def _has_valid_session(self) -> bool:
-        if not os.path.exists(self.session_file):
-            return False
-        try:
-            with open(self.session_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            cookies = data if isinstance(data, list) else data.get("cookies", [])
-            return any(".google.com" in c.get("domain", "") for c in cookies)
-        except Exception:
-            return False
-
-    def _load_session(self, driver) -> bool:
-        try:
-            with open(self.session_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            cookies = data if isinstance(data, list) else [
-                {"name": c.get("name",""), "value": c.get("value",""),
-                 "domain": c.get("domain",""), "path": c.get("path","/"),
-                 "expiry": int(c["expires"]) if c.get("expires",0) > 0 else None,
-                 "httpOnly": c.get("httpOnly", False),
-                 "secure": c.get("secure", False)}
-                for c in data.get("cookies", [])
-            ]
-            driver.get("https://business.gemini.google/")
-            time.sleep(2)
-            loaded = 0
-            for ck in cookies:
-                try:
-                    driver.add_cookie({k: v for k, v in ck.items() if v is not None})
-                    loaded += 1
-                except Exception:
-                    pass
-            self._log(f"   ✅ {loaded}/{len(cookies)} cookies dimuat", "SUCCESS")
-            return loaded > 0
-        except Exception as e:
-            self._log(f"   ⚠️  Load session gagal: {e}", "WARNING")
-            return False
-
-    def _save_session(self, driver):
-        try:
-            os.makedirs(os.path.dirname(self.session_file), exist_ok=True)
-            cookies = driver.get_cookies()
-            with open(self.session_file, "w", encoding="utf-8") as f:
-                json.dump(cookies, f, indent=2)
-            self._log(f"💾 Session tersimpan ({len(cookies)} cookies)", "SUCCESS")
-        except Exception as e:
-            self._log(f"   ⚠️  Gagal simpan session: {e}", "WARNING")
+            self._log("Temp profile directory cleaned up.")
+            self._temp_profile = None
 
     # ── Selenium helpers ──────────────────────────────────────────────────
     def _wait_for(self, driver, css_selector, timeout=15):
@@ -353,370 +391,390 @@ class GeminiEnterpriseProcessor(threading.Thread):
         element.click()
         time.sleep(random.uniform(0.3, 0.6))
         element.clear()
-        time.sleep(random.uniform(0.1, 0.25))
-        from selenium.webdriver.common.action_chains import ActionChains
+        time.sleep(random.uniform(0.1, 0.2))
         ac = ActionChains(driver)
         for char in text:
             ac.send_keys(char)
-            ac.pause(random.uniform(0.07, 0.16))
+            ac.pause(random.uniform(0.06, 0.14))
         ac.perform()
-        time.sleep(random.uniform(0.4, 0.7))
+        time.sleep(random.uniform(0.3, 0.6))
 
     def _human_click(self, driver, element):
         try:
-            from selenium.webdriver.common.action_chains import ActionChains
             ActionChains(driver).move_to_element(element).pause(
                 random.uniform(0.1, 0.3)
             ).click().perform()
         except Exception:
             element.click()
 
-    def _is_error_page(self, driver) -> bool:
-        try:
-            src = driver.page_source.lower()
-            return "try something else" in src or "let\u2019s try" in src
-        except Exception:
-            return False
-
-    def _is_otp_error_page(self, driver) -> bool:
-        """
-        Cek apakah halaman menampilkan error OTP salah/expired.
-        Return True jika ada keyword error OTP di page source.
-        """
-        try:
-            src = driver.page_source.lower()
-            return any(kw in src for kw in OTP_ERROR_KEYWORDS)
-        except Exception:
-            return False
-
-    def _click_signin_retry(self, driver) -> bool:
-        try:
-            for tag in ["a", "button"]:
-                for el in driver.find_elements(By.TAG_NAME, tag):
-                    txt = el.text.lower()
-                    if "sign" in txt and ("up" in txt or "in" in txt):
-                        self._log(f"   🔄 Klik retry: '{el.text.strip()}'")
-                        self._human_click(driver, el)
-                        time.sleep(random.uniform(2.5, 4.0))
-                        return True
-        except Exception as e:
-            self._log(f"   ⚠️  Click retry: {e}", "WARNING")
-        return False
-
-    # ── Main run ─────────────────────────────────────────────────────────
+    # ── Main run ──────────────────────────────────────────────────────────
     def run(self):
         os.makedirs(self.output_dir, exist_ok=True)
 
-        use_session = self._has_valid_session()
-        if use_session:
-            self._log("🔑 Session ditemukan → skip login & mask", "SUCCESS")
+        total    = len(self.prompts)
+        delay    = int(self.config.get("delay", 5))
+        retries  = int(self.config.get("retry",  1))
+
+        self._log("--- STARTING AUTOMATION ---")
+        self._log(f"Total prompts: {total}")
+        self._log("Account switching: automatic on rate limit")
+        self._log(f"Settings: delay {delay}s, retry {retries}x")
+        self._log("Account switching: automatic on rate limit detection")
+
+        current_index = self.start_index
+        account_attempt = 0
+
+        while current_index < total and not self._cancelled:
+            account_attempt += 1
+
+            # ── Setup browser + akun baru ──────────────────────────────────
+            driver = self._create_driver()
+            if driver is None:
+                self._done(False, "Failed to create browser.")
+                return
+
+            ok = self._register_account(driver, account_attempt)
+            if not ok:
+                self._quit_driver(driver)
+                self._done(False, "Account registration failed after retries.")
+                return
+
+            self._log("Account registration and setup completed successfully!")
+            self._log("Ready to process prompts.")
+
+            # ── Process prompts dengan akun ini ───────────────────────────
+            rate_limited = False
+            re_enter_prompt = None  # prompt yang perlu di-re-enter setelah switch
+
+            while current_index < total and not self._cancelled:
+                prompt = self.prompts[current_index]
+                prompt_num = current_index + 1
+
+                # Re-enter prompt jika ini adalah prompt yang interrupted
+                if re_enter_prompt:
+                    self._log(f"Re-entering prompt on new account...")
+                    prompt = re_enter_prompt
+                    re_enter_prompt = None
+
+                self._log(f"--- Processing Prompt {prompt_num}/{total} ---")
+                self._log(f"Prompt: {prompt[:40]}...")
+                self._log("Snapshot last process")
+
+                result = self._process_prompt(
+                    driver, prompt, prompt_num, total, delay
+                )
+
+                if result == "rate_limit":
+                    self._log("--- RATE LIMIT DETECTED ---")
+                    self._log("Switching to new account...")
+                    rate_limited = True
+                    re_enter_prompt = prompt  # jangan increment, re-try prompt ini
+                    break
+                elif result == "ok":
+                    current_index += 1
+                    if current_index < total:
+                        self._log(f"Waiting {delay} seconds before next prompt...")
+                        time.sleep(delay)
+                else:
+                    # Error lain, skip prompt ini
+                    self._log(f"Skipping prompt {prompt_num} due to error.", "WARNING")
+                    current_index += 1
+
+            # ── Switch akun ──────────────────────────────────────────────────────
+            if rate_limited:
+                self._log("--- SWITCHING TO NEW ACCOUNT ---")
+                self._log("Step 1: Closing browser")
+                self._quit_driver(driver)
+                self._log(f"Step 2: Waiting 5 seconds...")
+                time.sleep(5)
+                self._log("Step 3: Opening new browser")
+            else:
+                self._quit_driver(driver)
+
+        if not self._cancelled:
+            self._log("All prompts processed!")
+            self._done(True, f"Done! {current_index} prompts processed.")
         else:
-            self._log("⚠️  Session tidak ada → Login otomatis + mask baru", "WARNING")
+            self._done(False, "Cancelled.")
 
-        driver = self._create_driver()
-        if driver is None:
-            self._done(False, "Gagal membuat browser driver.")
-            return
-
-        try:
-            result = self._run_automation(driver, use_session)
-            if result:
-                self._done(True, f"✅ Video tersimpan: {result}", result)
-            else:
-                self._done(False, "Generate video gagal atau dibatalkan.")
-        except Exception as e:
-            self._log(f"❌ Fatal error: {e}", "ERROR")
-            import traceback
-            self._log(traceback.format_exc(), "ERROR")
-            self._done(False, str(e))
-        finally:
-            self._quit_driver(driver)
-            self._delete_current_mask()
-
-    # ── Automation ─────────────────────────────────────────────────────────
-    def _run_automation(self, driver, use_session: bool) -> Optional[str]:
-        self._progress(5, "Membuka Gemini Enterprise...")
-        self._log("🌐 Membuka https://business.gemini.google/ ...")
-
-        # ── Mode session (skip mask + login) ───────────────────────────────────
-        if use_session:
-            ok = self._load_session(driver)
+    # ── Account registration (Steps 1-7) ────────────────────────────────
+    def _register_account(self, driver, attempt_num: int = 1) -> bool:
+        for retry in range(1, MAX_ACCOUNT_RETRY + 1):
+            self._log(f"--- ACCOUNT REGISTRATION (Attempt {retry}/{MAX_ACCOUNT_RETRY}) ---")
+            ok = self._register_once(driver)
             if ok:
-                driver.refresh()
-                time.sleep(random.uniform(3, 5))
-                current = driver.current_url
-                if not any(x in current for x in ["signin", "login", "accounts.google"]):
-                    self._log("✅ Session valid! Langsung ke dashboard.", "SUCCESS")
-                    self._progress(50, "Session OK...")
-                    return self._run_veo(driver)
-                else:
-                    self._log("⚠️  Session expired, fallback ke login...", "WARNING")
-            else:
-                self._log("⚠️  Gagal load session, fallback ke login...", "WARNING")
+                return True
+            self._log(f"Registration attempt {retry} failed, retrying...", "WARNING")
+            time.sleep(3)
+        return False
 
-        # ── Login otomatis dengan mask BARU tiap attempt ──────────────────────────
-        for attempt in range(1, MAX_LOGIN_RETRY + 1):
-            if self._cancelled:
-                return None
+    def _register_once(self, driver) -> bool:
+        """
+        Jalankan 7 step registrasi. Return True jika berhasil.
+        """
+        # ── Step 1: Temp email ─────────────────────────────────────────────
+        self._log("Step 1: Getting fresh temp email")
+        self._mail_tab = self._mail_client.open_mailticking_tab(driver)
+        email = self._mail_client.get_fresh_email(driver)
+        if not email or "@" not in email:
+            self._log("Failed to get temp email", "ERROR")
+            return False
 
-            active_email = self._create_new_mask()
-            self._log(f"🔄 Login attempt {attempt}/{MAX_LOGIN_RETRY} — email: {active_email}")
-            self._progress(8, f"Login attempt {attempt}/{MAX_LOGIN_RETRY}...")
+        # ── Step 2: Buka Gemini Business di tab baru ────────────────────────
+        self._log("Step 2: Registering on Gemini Business")
+        time.sleep(random.uniform(1, 2))
 
-            if attempt == 1:
-                driver.get("https://www.google.com")
-                time.sleep(random.uniform(2, 3.5))
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 3)")
-                time.sleep(random.uniform(0.5, 1.2))
-
-            driver.get(GEMINI_HOME_URL)
-            time.sleep(random.uniform(3, 5))
-            self._debug_dump(driver, f"attempt{attempt}_redirect")
-
-            if self._is_error_page(driver):
-                self._log(f"⚠️  Error page sebelum input (attempt {attempt})", "WARNING")
-                if attempt < MAX_LOGIN_RETRY and self._click_signin_retry(driver):
-                    self._delete_current_mask()
-                    time.sleep(random.uniform(2, 3))
-                    continue
-                break
-
-            self._progress(10, "Menunggu form login...")
-            email_el = None
-            for sel in EMAIL_SELECTORS:
-                el = self._wait_for(driver, sel, timeout=12)
-                if el and el.is_displayed():
-                    self._log(f"   ✅ Form email: [{sel}]")
-                    email_el = el
-                    break
-
-            if not email_el:
-                self._log("   ❌ Form email tidak ditemukan!", "ERROR")
-                self._debug_dump(driver, f"attempt{attempt}_no_email")
-                self._delete_current_mask()
-                continue
-
-            self._log(f"📧 Input email: {active_email}")
+        gemini_opened = False
+        for tab_try in range(1, MAX_TAB_RETRY + 1):
             try:
-                self._human_type(driver, email_el, active_email)
-                val = email_el.get_attribute("value")
-                if val != active_email:
-                    email_el.clear()
-                    email_el.send_keys(active_email)
-                    time.sleep(0.5)
-                self._log(f"   ✅ Value: '{val}'")
-                time.sleep(random.uniform(0.9, 1.8))
-
-                submit_el = None
-                for sel in SUBMIT_SELECTORS:
-                    for el in driver.find_elements(By.CSS_SELECTOR, sel):
-                        if el.is_displayed() and el.is_enabled():
-                            submit_el = el
-                            break
-                    if submit_el:
-                        break
-
-                if submit_el:
-                    self._human_click(driver, submit_el)
+                driver.execute_script("window.open('about:blank', '_blank');")
+                time.sleep(1)
+                if len(driver.window_handles) > 1:
+                    driver.switch_to.window(driver.window_handles[-1])
+                    self._gemini_tab = driver.current_window_handle
+                    gemini_opened = True
+                    self._log("Opened new tab for Gemini Business")
+                    break
                 else:
-                    from selenium.webdriver.common.keys import Keys
-                    email_el.send_keys(Keys.RETURN)
+                    raise Exception("Tab not opened")
+            except Exception:
+                self._log(f"Tab open failed (attempt {tab_try}/{MAX_TAB_RETRY}), retrying...", "WARNING")
+                time.sleep(random.uniform(2, 4))
 
-                self._log("✅ Email tersubmit...")
-                time.sleep(random.uniform(3, 5))
+        if not gemini_opened:
+            self._log("Failed to open new tab after all methods", "ERROR")
+            return False
 
-            except Exception as e:
-                self._log(f"   ❌ Error input email: {e}", "ERROR")
-                self._debug_dump(driver, f"attempt{attempt}_email_error")
-                self._delete_current_mask()
-                continue
+        self._log("Registering on Gemini Business")
+        time.sleep(random.uniform(1.5, 2.5))
 
-            if self._is_error_page(driver):
-                self._log(f"⚠️  'Let's try something else' (attempt {attempt})", "WARNING")
-                self._debug_dump(driver, f"attempt{attempt}_error_after_submit")
-                self._delete_current_mask()
-                if attempt < MAX_LOGIN_RETRY and self._click_signin_retry(driver):
-                    for sel in EMAIL_SELECTORS:
-                        el = self._wait_for(driver, sel, timeout=12)
-                        if el and el.is_displayed():
-                            break
-                    time.sleep(random.uniform(1.5, 3))
-                    continue
+        # ── Navigasi ke login page ─────────────────────────────────────────
+        self._log("Navigating to Gemini Enterprise login page...")
+        driver.get(GEMINI_HOME_URL)
+        try:
+            WebDriverWait(driver, 20).until(
+                lambda d: d.current_url != "about:blank"
+            )
+        except Exception:
+            pass
+        self._log("Login page loaded.")
+        time.sleep(random.uniform(2, 3))
+
+        # Input email
+        EMAIL_SELECTORS = [
+            "input[name='loginHint']",
+            "input[id='email-input']",
+            "input[jsname='YPqjbf']",
+            "input[type='email']",
+            "input[name='email']",
+            "input[autocomplete='email']",
+            "input[type='text']",
+        ]
+        email_el = None
+        for sel in EMAIL_SELECTORS:
+            el = self._wait_for(driver, sel, timeout=12)
+            if el and el.is_displayed():
+                email_el = el
                 break
 
-            if self._cancelled:
-                return None
+        if not email_el:
+            self._log("Email input not found on login page", "ERROR")
+            self._debug_dump(driver, "no_email_input")
+            return False
 
-            # ── OTP polling ───────────────────────────────────────────────
-            self._progress(20, "Menunggu OTP...")
-            self._log(f"   URL: {driver.current_url}")
-            self._debug_dump(driver, "otp_page")
+        self._human_type(driver, email_el, email)
+        val = email_el.get_attribute("value")
+        self._log(f"Email entered: {val}")
+        time.sleep(random.uniform(0.8, 1.5))
 
-            otp_code = None
-            reg_ts   = int(time.time())
-            self._log(f"   ⏱️  OTP cutoff timestamp: {reg_ts}")
+        # Klik Continue / Submit
+        submit_el = None
+        for sel in ["button[type='submit']", "button"]:
+            for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                if el.is_displayed() and el.is_enabled():
+                    txt = el.text.lower()
+                    if any(w in txt for w in ["continue", "next", "submit", "sign"]):
+                        submit_el = el
+                        break
+                    elif not submit_el:
+                        submit_el = el
+            if submit_el:
+                break
 
-            for otp_try in range(1, MAX_OTP_RETRY + 1):
-                self._log(f"📬 Polling OTP ({otp_try}/{MAX_OTP_RETRY}) — mask: {active_email}...")
-                try:
-                    otp_code = self._otp_reader.wait_for_otp(
-                        sender          = "noreply-googlecloud@google.com",
-                        timeout         = OTP_TIMEOUT,
-                        interval        = 5,
-                        log_callback    = self.log_cb,
-                        mask_email      = active_email,
-                        after_timestamp = reg_ts,
-                    )
-                    self._log(f"✅ OTP: {otp_code}", "SUCCESS")
+        if submit_el:
+            self._human_click(driver, submit_el)
+            self._log("Clicked 'Continue with email' button.")
+        else:
+            email_el.send_keys(Keys.RETURN)
+            self._log("Pressed Enter to submit email.")
+
+        self._log("Waiting for verification page...")
+        time.sleep(random.uniform(3, 5))
+        self._log("Verification page loaded.")
+
+        # ── Step 3: Tunggu email verifikasi ────────────────────────────────
+        self._log("Step 3: Waiting for verification email")
+        found = self._mail_client.wait_for_verification_email(
+            driver,
+            mail_tab_handle   = self._mail_tab,
+            gemini_tab_handle = self._gemini_tab,
+            timeout           = OTP_TIMEOUT,
+        )
+        if not found:
+            self._log("Verification email not received (timeout)", "ERROR")
+            return False
+
+        # ── Step 4: Ekstrak kode verifikasi ────────────────────────────────
+        self._log("Step 4: Extracting verification code")
+        otp = self._mail_client.extract_verification_code(
+            driver,
+            mail_tab_handle = self._mail_tab,
+        )
+        if not otp:
+            self._log("Could not extract verification code", "ERROR")
+            return False
+        self._log(f"Verification code obtained: {otp}")
+
+        # ── Step 5: Masukkan kode OTP di Gemini ────────────────────────────
+        self._log("Step 5: Entering verification code")
+        driver.switch_to.window(self._gemini_tab)
+        self._log("Entering verification code")
+
+        otp_submitted = self._submit_otp(driver, otp)
+        if not otp_submitted:
+            self._log("OTP submission failed", "ERROR")
+            return False
+        self._log("Verification code entered")
+        time.sleep(random.uniform(1, 2))
+
+        # Klik Verify
+        for el in driver.find_elements(By.CSS_SELECTOR, "button"):
+            if any(w in el.text.lower() for w in ["verify", "confirm", "continue"]):
+                self._human_click(driver, el)
+                self._log("Clicked 'Verify' button.")
+                break
+        time.sleep(random.uniform(2, 3))
+
+        # ── Step 6: Signup form (isi nama) ─────────────────────────────────
+        self._log("Step 6: Completing signup")
+        self._log("Waiting for signup page to load...")
+        time.sleep(random.uniform(3, 5))
+
+        # Cek apakah ada form nama
+        name_el = None
+        for sel in [
+            "input[name='name']", "input[id*='name']",
+            "input[placeholder*='name' i]", "input[type='text']",
+        ]:
+            el = self._wait_for(driver, sel, timeout=8)
+            if el and el.is_displayed():
+                name_el = el
+                break
+
+        if name_el:
+            self._log("Signup page loaded. Filling name form...")
+            name = _random_name()
+            self._human_type(driver, name_el, name)
+            self._log(f"Name entered: {name}")
+            time.sleep(random.uniform(0.5, 1))
+
+            # Klik Agree / Get started
+            for el in driver.find_elements(By.CSS_SELECTOR, "button"):
+                if any(w in el.text.lower() for w in ["agree", "get started", "continue", "next"]):
+                    self._human_click(driver, el)
+                    self._log("Clicked 'Agree & get started' button.")
                     break
-                except TimeoutError:
-                    self._log(f"⚠️  OTP timeout ({otp_try})", "WARNING")
-                    if otp_try < MAX_OTP_RETRY:
-                        try:
-                            resend = driver.find_elements(By.XPATH,
-                                "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
-                                "'abcdefghijklmnopqrstuvwxyz'),'resend') or "
-                                "contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
-                                "'abcdefghijklmnopqrstuvwxyz'),'send again')]"
-                            )
-                            if resend:
-                                self._human_click(driver, resend[0])
-                                time.sleep(2)
-                                reg_ts = int(time.time())
-                        except Exception:
-                            pass
+        else:
+            self._log("No name form found, proceeding...", "WARNING")
 
-            if not otp_code:
-                self._log("❌ Gagal dapat OTP!", "ERROR")
-                self._debug_dump(driver, "otp_failed")
-                self._delete_current_mask()
-                return None
+        # ── Tunggu home page ───────────────────────────────────────────────
+        self._log("Waiting for Gemini Business home page to load (signing in)...")
+        loaded = False
+        for _ in range(40):
+            time.sleep(2)
+            url = driver.current_url
+            if "business.gemini.google" in url and "sign" not in url.lower():
+                loaded = True
+                break
+        if loaded:
+            self._log("Gemini Business home page loaded")
+        else:
+            self._log("Home page load timeout, continuing anyway...", "WARNING")
 
-            if self._cancelled:
-                return None
+        time.sleep(random.uniform(2, 3))
 
-            # ── Input OTP + verifikasi ─────────────────────────────────────────
-            otp_success = self._submit_and_verify_otp(driver, otp_code, active_email)
-            if otp_success:
-                return self._run_veo(driver)
-            else:
-                self._log("❌ OTP gagal! Hapus mask + coba ulang dari awal.", "ERROR")
-                self._debug_dump(driver, f"otp_failed_attempt{attempt}")
-                self._delete_current_mask()
-                # Lanjut ke attempt berikutnya (buat mask baru)
-                continue
+        # ── Step 7: Initial setup ──────────────────────────────────────────
+        self._log("Step 7: Initial setup")
+        self._log("Performing initial setup...")
+        self._initial_setup(driver)
 
-        self._log("❌ Semua login attempt gagal.", "ERROR")
-        return None
+        self._log("Account registration and setup completed successfully!")
+        return True
 
-    # ── Submit OTP + verifikasi hasilnya ──────────────────────────────────
-    def _submit_and_verify_otp(self, driver, otp_code: str, active_email: str) -> bool:
-        """
-        Submit kode OTP ke form Google, lalu verifikasi hasilnya:
-          - True  : redirect ke business.gemini.google (login sukses)
-          - False : OTP error page / redirect timeout / exception
-        """
-        self._progress(35, "Memasukkan OTP...")
+    def _submit_otp(self, driver, otp: str) -> bool:
+        """Masukkan kode OTP ke form Google."""
         try:
+            # Coba input per-karakter
             otp_inputs = driver.find_elements(By.CSS_SELECTOR,
                 "input[type='text'][maxlength='1'],"
                 "input[autocomplete='one-time-code'],"
                 "input[name*='otp'],input[name*='code']"
             )
             if len(otp_inputs) > 1:
-                for i, digit in enumerate(otp_code[:len(otp_inputs)]):
+                for i, digit in enumerate(otp[:len(otp_inputs)]):
                     otp_inputs[i].clear()
                     otp_inputs[i].send_keys(digit)
-                    time.sleep(random.uniform(0.1, 0.22))
+                    time.sleep(random.uniform(0.1, 0.2))
+                return True
             elif len(otp_inputs) == 1:
-                self._human_type(driver, otp_inputs[0], otp_code)
+                self._human_type(driver, otp_inputs[0], otp)
+                return True
             else:
-                from selenium.webdriver.common.action_chains import ActionChains
-                ActionChains(driver).send_keys(otp_code).perform()
-
-            time.sleep(random.uniform(0.7, 1.2))
-
-            # Klik tombol submit OTP
-            submit_found = False
-            for el in driver.find_elements(By.CSS_SELECTOR, "button[type='submit'],button"):
-                if any(w in el.text.lower() for w in ["verify", "continue", "sign in", "next"]):
-                    self._human_click(driver, el)
-                    submit_found = True
-                    break
-            if not submit_found:
-                from selenium.webdriver.common.keys import Keys
-                driver.find_element(By.TAG_NAME, "body").send_keys(Keys.RETURN)
-
-            self._log("✅ OTP tersubmit...")
-
-            # ── Tunggu redirect atau deteksi error OTP ──────────────────────
-            for wait_tick in range(30):
-                time.sleep(1)
-                current_url = driver.current_url
-
-                # Berhasil login
-                if "business.gemini.google" in current_url:
-                    self._log("✅ Login berhasil! Redirect ke dashboard.", "SUCCESS")
-                    self._save_session(driver)
-                    return True
-
-                # Deteksi halaman error OTP (kode salah / expired)
-                if self._is_otp_error_page(driver):
-                    self._log(
-                        f"   ❌ OTP '{otp_code}' SALAH atau EXPIRED — "
-                        f"halaman Google menolak kode ini.",
-                        "ERROR"
-                    )
-                    self._debug_dump(driver, "otp_rejected")
-                    return False
-
-                # Masih di halaman OTP / loading, lanjut polling
-                if wait_tick % 5 == 0 and wait_tick > 0:
-                    self._log(f"   ⏳ Menunggu redirect... ({wait_tick}s)")
-
-            # Timeout 30 detik tanpa redirect
-            self._log(
-                f"   ❌ Redirect timeout setelah OTP submit! URL: {driver.current_url}",
-                "ERROR"
-            )
-            return False
-
+                ActionChains(driver).send_keys(otp).perform()
+                return True
         except Exception as e:
-            self._log(f"❌ Error input OTP: {e}", "ERROR")
+            self._log(f"OTP input error: {e}", "WARNING")
             return False
 
-    # ── Veo ────────────────────────────────────────────────────────────
-    def _run_veo(self, driver) -> Optional[str]:
-        self._progress(50, "Membuka menu Veo...")
-        self._log("🎬 Mencari tombol tools...")
-        time.sleep(random.uniform(2.5, 4))
-        self._debug_dump(driver, "dashboard")
-
+    def _initial_setup(self, driver):
+        """Step 7: Tutup welcome dialog, pilih Veo tool."""
+        self._log("Closing welcome dialog...")
         try:
-            tools_btn = None
             for sel in [
-                "button[aria-label*='tool' i]",
-                "button[aria-label*='attach' i]",
-                "button[aria-label*='more' i]",
-                "[role='button'][aria-label*='tool' i]",
+                "button[aria-label*='close' i]", "button[aria-label*='dismiss' i]",
+                "[role='dialog'] button", ".modal button",
             ]:
-                el = self._wait_for(driver, sel, timeout=8)
-                if el and el.is_displayed():
-                    tools_btn = el
-                    break
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                for el in els:
+                    if el.is_displayed():
+                        self._human_click(driver, el)
+                        break
+        except Exception:
+            pass
+        self._log("Welcome dialog closed")
+        time.sleep(random.uniform(1, 2))
 
-            if not tools_btn:
-                btns = driver.find_elements(By.CSS_SELECTOR, "form button")
-                if btns:
-                    tools_btn = btns[0]
+        self._log("Clicking tools button...")
+        tools_btn = None
+        for sel in [
+            "button[aria-label*='tool' i]",
+            "button[aria-label*='attach' i]",
+            "button[aria-label*='more' i]",
+            "[role='button'][aria-label*='tool' i]",
+        ]:
+            el = self._wait_for(driver, sel, timeout=8)
+            if el and el.is_displayed():
+                tools_btn = el
+                break
+        if not tools_btn:
+            btns = driver.find_elements(By.CSS_SELECTOR, "form button")
+            if btns:
+                tools_btn = btns[0]
 
-            if not tools_btn:
-                self._log("❌ Tombol tools tidak ditemukan!", "ERROR")
-                self._debug_dump(driver, "no_tools")
-                return None
-
+        if tools_btn:
             self._human_click(driver, tools_btn)
-            time.sleep(random.uniform(0.9, 1.6))
+            self._log("Tools button clicked. Waiting for menu...")
+            time.sleep(random.uniform(1, 2))
 
             veo_el = None
             for sel in ["[role='menuitem']", "[role='option']", "li"]:
@@ -727,114 +785,218 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 if veo_el:
                     break
 
-            if not veo_el:
-                self._log("❌ Menu Veo tidak ditemukan!", "ERROR")
-                self._debug_dump(driver, "no_veo")
-                return None
+            if veo_el:
+                self._human_click(driver, veo_el)
+                self._log("Clicking 'Create videos with Veo'...")
+                time.sleep(random.uniform(1, 2))
+                self._log("'Create videos with Veo' selected")
 
-            self._log(f"   ✅ Veo: '{veo_el.text.strip()}'")
-            self._human_click(driver, veo_el)
-            time.sleep(random.uniform(1.5, 2.5))
+        self._log("Initial setup completed successfully!")
 
-        except Exception as e:
-            self._log(f"❌ Error menu: {e}", "ERROR")
-            self._debug_dump(driver, "menu_error")
-            return None
-
-        if self._cancelled:
-            return None
-
-        self._progress(60, "Input prompt...")
-        try:
-            prompt_el = None
-            for sel in ["textarea", "[contenteditable='true']", "[role='textbox']"]:
-                el = self._wait_for(driver, sel, timeout=10)
-                if el and el.is_displayed():
-                    prompt_el = el
-                    break
-            if not prompt_el:
-                self._log("❌ Input prompt tidak ditemukan!", "ERROR")
-                return None
-
-            self._human_type(driver, prompt_el, self.prompt)
-            time.sleep(random.uniform(0.7, 1.2))
-
-            send = driver.find_elements(By.CSS_SELECTOR,
-                "button[aria-label*='send' i],button[aria-label*='generate' i],"
-                "button[aria-label*='Submit' i],button[type='submit']"
-            )
-            if send:
-                self._human_click(driver, send[0])
-            else:
-                from selenium.webdriver.common.keys import Keys
-                prompt_el.send_keys(Keys.RETURN)
-
-            self._log("✅ Prompt tersubmit!", "SUCCESS")
-        except Exception as e:
-            self._log(f"❌ Error prompt: {e}", "ERROR")
-            return None
-
-        if self._cancelled:
-            return None
-
-        self._progress(70, "Menunggu Veo generate...")
-        start = time.time()
-        video_ready = False
-        while time.time() - start < VIDEO_GEN_TIMEOUT:
-            if self._cancelled:
-                return None
-            elapsed = int(time.time() - start)
-            self._progress(
-                min(70 + int((elapsed / VIDEO_GEN_TIMEOUT) * 18), 88),
-                f"Generate... {elapsed}s/{VIDEO_GEN_TIMEOUT}s"
-            )
+    # ── Process single prompt ───────────────────────────────────────────────
+    def _process_prompt(
+        self, driver, prompt: str, prompt_num: int, total: int, delay: int
+    ) -> str:
+        """
+        Process satu prompt.
+        Return: 'ok' | 'rate_limit' | 'error'
+        """
+        if self._gemini_tab:
             try:
-                if driver.find_elements(By.CSS_SELECTOR, "button[aria-label*='download' i],a[download]"):
-                    video_ready = True; break
-                for btn in driver.find_elements(By.TAG_NAME, "button"):
-                    if "download" in btn.text.lower():
-                        video_ready = True; break
-                if video_ready:
+                driver.switch_to.window(self._gemini_tab)
+            except Exception:
+                pass
+
+        self._progress(
+            int((prompt_num / total) * 100),
+            f"Prompt {prompt_num}/{total}"
+        )
+
+        # Input prompt
+        self._log(f"Inputting prompt: {prompt[:40]}...")
+        prompt_el = None
+        for sel in ["textarea", "[contenteditable='true']", "[role='textbox']"]:
+            el = self._wait_for(driver, sel, timeout=10)
+            if el and el.is_displayed():
+                prompt_el = el
+                break
+
+        if not prompt_el:
+            self._log("Prompt input not found", "ERROR")
+            return "error"
+
+        self._human_type(driver, prompt_el, prompt)
+        self._log("Prompt inputted successfully")
+        time.sleep(random.uniform(0.7, 1.2))
+
+        # Klik generate
+        self._log("Clicking generate button...")
+        send_els = driver.find_elements(By.CSS_SELECTOR,
+            "button[aria-label*='send' i],button[aria-label*='generate' i],"
+            "button[aria-label*='Submit' i],button[type='submit']"
+        )
+        if send_els:
+            self._human_click(driver, send_els[0])
+        else:
+            prompt_el.send_keys(Keys.RETURN)
+        self._log("Generate button clicked")
+        time.sleep(random.uniform(2, 3))
+
+        # Tunggu + deteksi rate limit
+        self._log("Waiting for video generation...")
+        return self._wait_for_generation(driver, prompt_num)
+
+    def _wait_for_generation(self, driver, prompt_num: int) -> str:
+        """
+        Tunggu generasi video. Deteksi rate limit via 'thinking' yang hilang terlalu cepat.
+        Return: 'ok' | 'rate_limit' | 'error'
+        """
+        # Deteksi thinking indicator muncul
+        thinking_start = None
+        thinking_appeared = False
+
+        # Poll singkat untuk cek thinking muncul
+        for _ in range(10):
+            try:
+                src = driver.page_source.lower()
+                if any(k in src for k in ["thinking", "generating", "loading"]):
+                    if not thinking_appeared:
+                        thinking_appeared = True
+                        thinking_start = time.time()
+                        self._log("Thinking...")
                     break
             except Exception:
                 pass
+            time.sleep(0.5)
+
+        # Cek apakah thinking langsung hilang (rate limit)
+        if thinking_appeared and thinking_start:
+            time.sleep(2)
+            try:
+                src = driver.page_source.lower()
+                thinking_still = any(k in src for k in ["thinking", "generating"])
+                elapsed = time.time() - thinking_start
+                if not thinking_still and elapsed < RATE_LIMIT_THINKING_THRESHOLD:
+                    self._log(
+                        f"Thinking disappeared after only {elapsed:.1f}s "
+                        f"- RATE LIMIT detected!"
+                    )
+                    return "rate_limit"
+            except Exception:
+                pass
+
+        # Tunggu video selesai
+        start = time.time()
+        while time.time() - start < VIDEO_GEN_TIMEOUT:
+            if self._cancelled:
+                return "error"
+            elapsed = int(time.time() - start)
+
+            try:
+                src = driver.page_source.lower()
+
+                # Cek rate limit di halaman
+                if any(k in src for k in [
+                    "rate limit", "quota exceeded", "try again later",
+                    "too many requests"
+                ]):
+                    self._log("Rate limit message detected on page")
+                    return "rate_limit"
+
+                # Cek selesai
+                if driver.find_elements(By.CSS_SELECTOR,
+                    "button[aria-label*='download' i],a[download]"):
+                    break
+                for btn in driver.find_elements(By.TAG_NAME, "button"):
+                    if "download" in btn.text.lower():
+                        break
+
+                # Cek masih loading
+                if any(k in src for k in ["thinking", "generating", "rendering"]):
+                    if elapsed % 12 == 0 and elapsed > 0:
+                        self._log(f"Still generating... ({elapsed}s elapsed)")
+                else:
+                    # Thinking selesai, tunggu render
+                    if elapsed > 5:
+                        if elapsed % 12 == 0:
+                            self._log("Thinking completed. Waiting for video to render...")
+
+            except Exception:
+                pass
+
             time.sleep(POLLING_INTERVAL)
+        else:
+            self._log("Video generation timeout", "WARNING")
+            return "error"
 
-        if not video_ready:
-            self._debug_dump(driver, "polling_timeout")
-            return None
+        self._log("Video generation complete!")
+        return self._download_video(driver, prompt_num)
 
-        self._progress(90, "Mendownload video...")
+    def _download_video(self, driver, prompt_num: int) -> str:
+        """Klik download, tunggu file."""
+        self._log("Downloading video...")
         try:
             dl_btn = None
             for sel in ["button[aria-label*='download' i]", "a[download]"]:
                 els = driver.find_elements(By.CSS_SELECTOR, sel)
                 if els:
-                    dl_btn = els[0]; break
+                    dl_btn = els[0]
+                    break
             if not dl_btn:
                 for btn in driver.find_elements(By.TAG_NAME, "button"):
                     if "download" in btn.text.lower():
-                        dl_btn = btn; break
+                        dl_btn = btn
+                        break
             if not dl_btn:
-                raise Exception("Tombol download tidak ditemukan")
+                self._log("Download button not found", "ERROR")
+                return "error"
 
             self._human_click(driver, dl_btn)
-            self._log("✅ Klik download, menunggu file...")
+            self._log("Download button clicked")
+            time.sleep(random.uniform(1, 2))
 
+            # Cek popup konfirmasi download
+            self._log("Looking for download confirmation popup...")
+            try:
+                for el in driver.find_elements(By.CSS_SELECTOR, "button"):
+                    if any(w in el.text.lower() for w in ["download", "confirm", "save"]):
+                        if el.is_displayed():
+                            self._human_click(driver, el)
+                            self._log("Download confirmation clicked")
+                            break
+            except Exception:
+                pass
+
+            self._log("Video download initiated successfully")
+
+            # Tunggu file muncul
             for _ in range(120):
                 time.sleep(1)
-                files = [f for f in os.listdir(self.output_dir)
-                         if f.endswith(".mp4") or f.endswith(".webm")]
+                files = [
+                    f for f in os.listdir(self.output_dir)
+                    if f.endswith((".mp4", ".webm"))
+                    and not f.endswith(".crdownload")
+                ]
                 if files:
                     newest = max(
                         [os.path.join(self.output_dir, f) for f in files],
                         key=os.path.getmtime
                     )
-                    self._log(f"✅ File: {newest}", "SUCCESS")
-                    self._progress(100, "Selesai!")
-                    return newest
+                    fname = f"ReenzAuto_G-Business_{prompt_num}_{int(time.time()*1000)}.mp4"
+                    dest  = os.path.join(self.output_dir, fname)
+                    try:
+                        if newest != dest:
+                            os.rename(newest, dest)
+                        newest = dest
+                    except Exception:
+                        pass
+                    self._log(f"Saved: {os.path.basename(newest)}")
+                    self._log(f"Successfully processed prompt {prompt_num}")
+                    return "ok"
 
-            raise Exception("File tidak muncul setelah 120s")
+            self._log("File did not appear after 120s", "WARNING")
+            return "error"
+
         except Exception as e:
-            self._log(f"❌ Download gagal: {e}", "ERROR")
-            return None
+            self._log(f"Download error: {e}", "ERROR")
+            return "error"
