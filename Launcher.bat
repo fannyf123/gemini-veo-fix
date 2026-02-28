@@ -9,6 +9,10 @@ echo    Gemini Veo Tester (GUI Mode)
 echo    business.gemini.google automation
 echo  ============================================
 echo.
+echo.
+
+echo [INFO] Mencari pembaruan terbaru dari GitHub...
+git pull origin main
 
 if exist .venv\Scripts\activate.bat (
     echo [INFO] Mengaktifkan Virtual Environment...
