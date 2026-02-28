@@ -24,7 +24,7 @@ Otomasi mailticking.com sesuai tampilan nyata:
   +------------------------------------------+
 
 EXACT ELEMENTS dari inspect:
-  Tombol Change (klik sebelum activate untuk generate email baru):
+  Tombol Change (klik berulang sampai email @googlemail.com):
     <button class="btn btn-info" type="button" id="modalChange">
       <i class="fa fa-random"></i>
       <span class="d-none d-md-inline"> Change</span>
@@ -76,7 +76,6 @@ def _extract_otp_from_html(html: str) -> Optional[str]:
     except Exception:
         return None
 
-    # Prioritas 1: span.verification-code (exact class dari inspect)
     for tag in soup.find_all("span", class_="verification-code"):
         text = re.sub(r'\s+', '', tag.get_text(strip=True))
         if re.fullmatch(r'[A-Z0-9]{4,8}', text, re.IGNORECASE):
@@ -105,14 +104,12 @@ def _extract_otp_from_html(html: str) -> Optional[str]:
             return True
         return False
 
-    # Prioritas 2: tag dengan style OTP
     for tag in soup.find_all(True):
         if _is_otp_tag(tag):
             text = re.sub(r'\s+', '', tag.get_text(strip=True))
             if re.fullmatch(r'[A-Z0-9]{4,8}', text, re.IGNORECASE):
                 return text.upper()
 
-    # Prioritas 3: tag standalone
     STANDALONE = ["td", "div", "span", "p", "b", "strong", "h1", "h2", "h3"]
     SKIP_WORDS = {
         "THIS", "THAT", "FROM", "WITH", "YOUR", "EMAIL", "ALIAS",
@@ -126,7 +123,6 @@ def _extract_otp_from_html(html: str) -> Optional[str]:
             if code not in SKIP_WORDS:
                 return code
 
-    # Prioritas 4: regex di plain text
     plain = soup.get_text(separator=" ")
     patterns = [
         r'(?:verification|one-time)\s+code[^A-Z0-9]{0,20}([A-Z0-9]{4,8})\b',
@@ -180,7 +176,6 @@ class MailtickingClient:
                 time.sleep(0.3)
 
     def _wait_for_modal(self, driver, timeout: int = 15) -> bool:
-        """Tunggu modal 'Your Temp Email is Ready' - cek Activate button muncul."""
         try:
             WebDriverWait(driver, timeout).until(
                 EC.presence_of_element_located(
@@ -219,7 +214,7 @@ class MailtickingClient:
     def get_fresh_email(self, driver) -> str:
         """
         Step 3-6:
-          3. Klik button#modalChange -> generate email address baru
+          3. Klik button#modalChange berulang sampai email @googlemail.com
           4. Uncheck semua KECUALI input#type3 (abc@googlemail.com)
           5. Klik a.activeBtn (Activate)
           6. Tunggu halaman reload -> baca email dari input bar
@@ -230,18 +225,13 @@ class MailtickingClient:
         else:
             self._log("Modal not detected, proceeding anyway...", "WARNING")
 
-        # Step 3: Klik Change untuk generate email baru
-        # EXACT: <button class="btn btn-info" type="button" id="modalChange">
-        self._click_change(driver)
-        time.sleep(random.uniform(1.5, 2.5))
+        # Step 3: Loop klik Change sampai email field = @googlemail.com
+        email = self._click_change_until_googlemail(driver)
+        self._log(f"Googlemail email ready: {email}")
 
         # Step 4: Configure checkboxes
         self._configure_checkboxes(driver)
         time.sleep(0.5)
-
-        # Baca email sebelum activate
-        old_email = self._read_current_email(driver)
-        self._log(f"Current email before activate: {old_email}")
 
         # Step 5: Klik Activate
         self._click_activate(driver)
@@ -250,59 +240,127 @@ class MailtickingClient:
         self._log("Waiting for page to reload after Activate...")
         time.sleep(random.uniform(3, 5))
 
-        # Baca email aktif dari navbar input bar atas
-        final_email = self._read_email_from_navbar(driver) or old_email
+        # Baca email aktif dari navbar
+        final_email = self._read_email_from_navbar(driver) or email
         self._log(f"Temp email obtained: {final_email}")
         return final_email
 
     # -------------------------------------------------------------------------
-    def _click_change(self, driver):
+    def _read_email_from_modal(self, driver) -> str:
         """
-        Klik tombol Change untuk generate email address baru.
-        EXACT dari inspect:
-          <button class="btn btn-info" type="button" id="modalChange">
-            <i class="fa fa-random"></i>
-            <span class="d-none d-md-inline"> Change</span>
-          </button>
+        Baca email yang sedang tampil di field modal (sebelum activate).
         """
         for sel in [
+            ".modal input[type='text']",
+            ".modal input[type='email']",
+            ".modal input[readonly]",
+            ".modal input",
+            "input[type='text']",
+            "input[type='email']",
+            "input[readonly]",
+            "#email",
+        ]:
+            try:
+                el  = driver.find_element(By.CSS_SELECTOR, sel)
+                val = (el.get_attribute("value") or el.text or "").strip()
+                if "@" in val:
+                    return val
+            except Exception:
+                pass
+        # Fallback: ambil dari page source (value="...@...")
+        try:
+            m = re.search(
+                r'value="([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})"',
+                driver.page_source
+            )
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+        return ""
+
+    def _click_change_until_googlemail(
+        self, driver, max_attempts: int = 20
+    ) -> str:
+        """
+        Klik button#modalChange berulang sampai email field berisi @googlemail.com.
+
+        EXACT: <button class="btn btn-info" type="button" id="modalChange">
+
+        Alur per iterasi:
+          1. Baca email saat ini
+          2. Jika sudah @googlemail.com -> selesai
+          3. Klik Change button
+          4. Tunggu email di field berubah (beda dari sebelumnya)
+          5. Ulangi sampai max_attempts
+        """
+        # Selector Change button, urutan prioritas
+        CHANGE_SELECTORS = [
             "button#modalChange",
             "#modalChange",
             "button.btn-info#modalChange",
-            "button.btn.btn-info[id='modalChange']",
-        ]:
+        ]
+
+        def _find_change_btn():
+            for sel in CHANGE_SELECTORS:
+                try:
+                    el = driver.find_element(By.CSS_SELECTOR, sel)
+                    if el.is_displayed():
+                        return el
+                except Exception:
+                    pass
+            # Fallback: button.btn-info dengan teks 'change'
             try:
-                el = driver.find_element(By.CSS_SELECTOR, sel)
-                if el.is_displayed():
-                    self._js_click(driver, el)
-                    self._log("Clicked Change button (button#modalChange) -> new email generated")
-                    return
+                for btn in driver.find_elements(By.CSS_SELECTOR, "button.btn-info"):
+                    if "change" in (btn.text or "").lower() and btn.is_displayed():
+                        return btn
             except Exception:
                 pass
+            return None
 
-        # Fallback: cari button btn-info dengan teks change / fa-random
-        try:
-            btns = driver.find_elements(By.CSS_SELECTOR, "button.btn-info")
-            for btn in btns:
-                txt = (btn.text or "").lower().strip()
-                aria = (btn.get_attribute("aria-label") or "").lower()
-                if "change" in txt or "change" in aria or "random" in txt:
-                    self._js_click(driver, btn)
-                    self._log("Clicked Change button (btn-info fallback)")
-                    return
-        except Exception:
-            pass
+        for attempt in range(1, max_attempts + 1):
+            current_email = self._read_email_from_modal(driver)
 
-        self._log("Change button not found, using existing email", "WARNING")
+            # Cek apakah sudah @googlemail.com
+            if "@googlemail.com" in current_email.lower():
+                self._log(
+                    f"Email is @googlemail.com on attempt {attempt}: {current_email}")
+                return current_email
+
+            self._log(
+                f"Attempt {attempt}/{max_attempts}: "
+                f"email '{current_email}' bukan @googlemail.com, klik Change..."
+            )
+
+            # Cari dan klik Change button
+            btn = _find_change_btn()
+            if not btn:
+                self._log("Change button tidak ditemukan", "WARNING")
+                break
+
+            self._js_click(driver, btn)
+
+            # Tunggu email di field berubah (max 3 detik polling)
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                time.sleep(0.4)
+                new_email = self._read_email_from_modal(driver)
+                if new_email and new_email != current_email:
+                    break  # email sudah ganti, lanjut cek lagi
+
+        # Jika sudah max_attempts tapi belum @googlemail.com,
+        # kembalikan email terakhir dan lanjut saja
+        last_email = self._read_email_from_modal(driver)
+        self._log(
+            f"Max attempts reached. Last email: {last_email}", "WARNING")
+        return last_email
 
     # -------------------------------------------------------------------------
     def _configure_checkboxes(self, driver):
         """
-        EXACT dari inspect element:
-          <input class="form-check-input type" type="checkbox" name="type" id="type3" value="3">
-          -> ini adalah abc@googlemail.com, HARUS checked
-
-          Semua checkbox lain (name="type", id != type3) -> HARUS unchecked
+        EXACT dari inspect:
+          id="type3" = abc@googlemail.com -> HARUS checked
+          Semua lain -> HARUS unchecked
         """
         try:
             checkboxes = driver.find_elements(
@@ -336,8 +394,6 @@ class MailtickingClient:
                             pass
 
                     combined = label_text + cb_value + cb_name + cb_id
-
-                    # id="type3" atau label mengandung "googlemail" -> CHECKED
                     is_googlemail = (cb_id == "type3") or ("googlemail" in combined)
                     currently_checked = cb.is_selected()
 
@@ -361,25 +417,9 @@ class MailtickingClient:
             self._log(f"Checkbox config error: {e}", "WARNING")
 
     def _read_current_email(self, driver) -> str:
-        """Baca email dari input field di modal."""
-        for sel in [
-            ".modal input[type='text']", ".modal input[type='email']",
-            ".modal input[readonly]", "input[type='text']",
-            "input[type='email']", "input[readonly]", "#email",
-        ]:
-            try:
-                el  = driver.find_element(By.CSS_SELECTOR, sel)
-                val = el.get_attribute("value") or el.text or ""
-                if "@" in val:
-                    return val.strip()
-            except Exception:
-                pass
-        return ""
+        return self._read_email_from_modal(driver)
 
     def _read_email_from_navbar(self, driver) -> str:
-        """
-        Setelah modal/activate, email aktif tampil di input bar atas.
-        """
         for sel in [
             "input[type='text']", "input[type='email']",
             "input[readonly]", ".navbar input",
@@ -405,8 +445,7 @@ class MailtickingClient:
 
     def _click_activate(self, driver):
         """
-        EXACT dari inspect:
-          <a href="javascript:;" class="btn btn-warning mx-auto btn-lg activeBtn">
+        EXACT: <a href="javascript:;" class="btn btn-warning mx-auto btn-lg activeBtn">
         """
         for sel in [
             "a.activeBtn",
@@ -422,8 +461,6 @@ class MailtickingClient:
                     return
             except Exception:
                 pass
-
-        # Fallback: cari semua a/button dengan teks 'activate'
         for tag in ["a", "button"]:
             for el in driver.find_elements(By.TAG_NAME, tag):
                 try:
@@ -436,9 +473,6 @@ class MailtickingClient:
         self._log("Activate button not found", "WARNING")
 
     def _click_check_emails(self, driver) -> bool:
-        """
-        Klik tombol 'Check emails' di halaman inbox.
-        """
         for tag in ["button", "a"]:
             for el in driver.find_elements(By.TAG_NAME, tag):
                 try:
@@ -452,14 +486,10 @@ class MailtickingClient:
 
     def _find_gemini_row(self, driver):
         """
-        Cari link email Gemini di inbox.
-        EXACT dari inspect:
-          <a href="/mail/view/{hash}/" rel="nofollow">Gemini Enterprise verification code</a>
+        EXACT: <a href="/mail/view/{hash}/" rel="nofollow">Gemini Enterprise verification code</a>
         """
         try:
-            links = driver.find_elements(
-                By.CSS_SELECTOR, "a[href*='/mail/view/']"
-            )
+            links = driver.find_elements(By.CSS_SELECTOR, "a[href*='/mail/view/']")
             for link in links:
                 txt = (link.text or "").lower()
                 if any(k in txt for k in ["gemini", "verification", "enterprise"]):
@@ -468,7 +498,6 @@ class MailtickingClient:
                 return links[0]
         except Exception:
             pass
-
         KEYWORDS = ["gemini", "verification code", "enterprise", "noreply-googlecloud"]
         try:
             rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
@@ -494,11 +523,6 @@ class MailtickingClient:
         gemini_tab_handle: str,
         timeout:           int = 90,
     ) -> bool:
-        """
-        Step 10-11:
-          10. Kembali ke tab mailticking
-          11. Reload halaman (browser refresh) untuk cek pesan baru
-        """
         self._log("Checking inbox for verification email...")
         driver.switch_to.window(mail_tab_handle)
         self._log("Switched to mailticking.com tab")
@@ -514,7 +538,6 @@ class MailtickingClient:
                     pass
                 time.sleep(random.uniform(2, 3))
 
-                # Jika modal muncul lagi setelah refresh, dismiss
                 try:
                     act_btn = driver.find_elements(By.CSS_SELECTOR, "a.activeBtn, .activeBtn")
                     if any(b.is_displayed() for b in act_btn):
@@ -547,12 +570,6 @@ class MailtickingClient:
         driver,
         mail_tab_handle: str,
     ) -> Optional[str]:
-        """
-        Step 12-13:
-          12. Klik link 'Gemini Enterprise verification code'
-              EXACT: <a href="/mail/view/{hash}/" rel="nofollow">...
-          13. Tunggu halaman load -> cari span.verification-code
-        """
         self._log("Extracting verification code from email...")
         driver.switch_to.window(mail_tab_handle)
 
@@ -572,10 +589,8 @@ class MailtickingClient:
             self._log("Could not find Gemini email link", "WARNING")
             time.sleep(2)
 
-        # Prioritas: span.verification-code (exact dari inspect)
         try:
-            otp_el = driver.find_element(
-                By.CSS_SELECTOR, "span.verification-code")
+            otp_el = driver.find_element(By.CSS_SELECTOR, "span.verification-code")
             otp = otp_el.text.strip()
             if re.fullmatch(r'[A-Z0-9]{4,8}', otp, re.IGNORECASE):
                 self._log(f"Verification code extracted (span.verification-code): {otp.upper()}")
@@ -583,7 +598,6 @@ class MailtickingClient:
         except Exception:
             pass
 
-        # Fallback: parse seluruh page source
         html_content = ""
         try:
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
