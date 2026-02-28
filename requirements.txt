@@ -3,4 +3,5 @@ selenium-stealth
 beautifulsoup4
 lxml
 requests
-customtkinter
+PySide6
+qtawesome

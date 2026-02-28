@@ -44,6 +44,8 @@ import threading
 import subprocess
 from typing import Optional, Callable
 
+from PySide6.QtCore import QThread, Signal
+
 try:
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service
@@ -356,9 +358,13 @@ def _setup_chromedriver(base_dir: str, log_fn: Callable) -> Optional[str]:
     except Exception as e:
         log_fn(f"ChromeDriver download failed: {e}", "WARNING")
     return None
+    return None
 
 
-class GeminiEnterpriseProcessor(threading.Thread):
+class GeminiEnterpriseProcessor(QThread):
+    log_signal      = Signal(str, str)
+    progress_signal = Signal(int, str)
+    finished_signal = Signal(bool, str, str)
 
     def __init__(
         self,
@@ -371,7 +377,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         finished_callback: Optional[Callable] = None,
         start_index:       int = 0,
     ):
-        super().__init__(daemon=True)
+        super().__init__()
         self.base_dir       = base_dir
         self.prompts        = prompts
         self.output_dir     = output_dir or os.path.join(base_dir, "OUTPUT_GEMINI")
@@ -387,14 +393,17 @@ class GeminiEnterpriseProcessor(threading.Thread):
     def _log(self, msg, level="INFO"):
         if self.log_cb:
             self.log_cb(msg, level)
+        self.log_signal.emit(msg, level)
 
     def _progress(self, pct, msg):
         if self.progress_cb:
             self.progress_cb(pct, msg)
+        self.progress_signal.emit(pct, msg)
 
     def _done(self, ok, msg, path=""):
         if self.finished_cb:
             self.finished_cb(ok, msg, path)
+        self.finished_signal.emit(ok, msg, path)
 
     def cancel(self):
         self._cancelled = True
