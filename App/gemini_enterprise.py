@@ -26,6 +26,8 @@ Alur lengkap (EXACT selectors dari inspect element):
   Step 19 : Input prompt ke ProseMirror editor - tekan Enter
   Step 20 : Tunggu div.thinking-message hilang - tunggu video render
   Step 21 : Download video
+    21a: Klik button#button[aria-label="Download video file"]
+    21b: Tunggu popup konfirmasi muncul -> klik button#button.button
 """
 import os
 import re
@@ -278,6 +280,9 @@ class GeminiEnterpriseProcessor(threading.Thread):
         except Exception:
             pass
 
+    def _js_click(self, driver, element):
+        driver.execute_script("arguments[0].click();", element)
+
     # ── Driver setup ──────────────────────────────────────────────────────
     def _create_driver(self) -> Optional[object]:
         self._log("Setting up fresh Chrome browser...")
@@ -358,7 +363,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
             return None
 
     def _wait_gone(self, driver, css_selector, timeout=60):
-        """Tunggu sampai element hilang dari DOM/tidak visible."""
         try:
             WebDriverWait(driver, timeout).until(
                 EC.invisibility_of_element_located((By.CSS_SELECTOR, css_selector)))
@@ -458,7 +462,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
         return False
 
     def _register_once(self, driver) -> bool:
-        # ── Step 1-2: Buka mailticking, dapat email ────────────────────────
         self._log("Step 1: Getting fresh temp email from mailticking.com")
         self._mail_tab = self._mail_client.open_mailticking_tab(driver)
         email = self._mail_client.get_fresh_email(driver)
@@ -467,7 +470,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
             return False
         self._log(f"Temp email: {email}")
 
-        # ── Step 5: Buka Gemini Business di tab baru ───────────────────────
         self._log("Step 2: Opening Gemini Business in new tab")
         for tab_try in range(1, MAX_TAB_RETRY + 1):
             try:
@@ -485,7 +487,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._log("Failed to open new tab", "ERROR")
             return False
 
-        # Navigasi ke Gemini Business
         self._log("Navigating to business.gemini.google...")
         driver.get(GEMINI_HOME_URL)
         try:
@@ -496,14 +497,11 @@ class GeminiEnterpriseProcessor(threading.Thread):
         time.sleep(random.uniform(2, 3))
         self._log("Gemini Business page loaded.")
 
-        # ── Step 6: Input email ────────────────────────────────────────────
         self._log("Step 3: Entering email address")
-        # EXACT dari inspect: input#email-input, jsname="YPqjbf", name="loginHint"
         EMAIL_SELECTORS = [
             "input#email-input",
             "input[jsname='YPqjbf']",
             "input[name='loginHint']",
-            "input[id='email-input']",
             "input[type='email']",
             "input[type='text']",
         ]
@@ -524,9 +522,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         self._log(f"Email entered: {email}")
         time.sleep(random.uniform(0.8, 1.5))
 
-        # ── Step 7: Klik Continue with email ──────────────────────────────
         self._log("Step 4: Clicking 'Continue with email'")
-        # EXACT dari inspect: button#log-in-button, aria-label="Continue with email"
         submit_el = None
         for sel in [
             "button#log-in-button",
@@ -550,12 +546,10 @@ class GeminiEnterpriseProcessor(threading.Thread):
             email_el.send_keys(Keys.RETURN)
             self._log("Pressed Enter to submit email")
 
-        # ── Step 8: Tunggu halaman OTP ─────────────────────────────────────
         self._log("Step 5: Waiting for OTP page to load...")
         time.sleep(random.uniform(3, 5))
         self._log("OTP page loaded.")
 
-        # ── Step 9: Kembali ke mailticking, cek email ─────────────────────
         self._log("Step 6: Checking mailticking inbox for verification email")
         found = self._mail_client.wait_for_verification_email(
             driver,
@@ -567,7 +561,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._log("Verification email not received (timeout)", "ERROR")
             return False
 
-        # ── Step 10: Ekstrak OTP ──────────────────────────────────────────
         self._log("Step 7: Extracting OTP from email")
         otp = self._mail_client.extract_verification_code(
             driver,
@@ -578,7 +571,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
             return False
         self._log(f"OTP obtained: {otp}")
 
-        # ── Step 11: Kembali ke Gemini, input OTP ─────────────────────────
         self._log("Step 8: Entering OTP on Gemini")
         driver.switch_to.window(self._gemini_tab)
         time.sleep(random.uniform(1, 2))
@@ -590,14 +582,12 @@ class GeminiEnterpriseProcessor(threading.Thread):
         self._log("OTP entered")
         time.sleep(random.uniform(0.8, 1.2))
 
-        # ── Step 12: Klik Verify ──────────────────────────────────────────
         self._log("Step 9: Clicking Verify button")
-        # Span.YUhpIc-RLmnJb adalah bagian dari verify button
         verify_clicked = False
         for sel in [
             "button[jsname='LgbsSe']",
             "button[type='submit']",
-            ".YUhpIc-RLmnJb",  # exact dari inspect
+            ".YUhpIc-RLmnJb",
         ]:
             try:
                 els = driver.find_elements(By.CSS_SELECTOR, sel)
@@ -613,7 +603,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 pass
 
         if not verify_clicked:
-            # Fallback: cari button teks verify/confirm
             for el in driver.find_elements(By.TAG_NAME, "button"):
                 try:
                     if any(w in el.text.lower() for w in ["verify", "confirm", "continue"])\
@@ -627,9 +616,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
         time.sleep(random.uniform(2, 4))
 
-        # ── Step 13: Form nama ────────────────────────────────────────────
         self._log("Step 10: Completing signup - entering name")
-        # EXACT: input[formcontrolname="fullName"], id="mat-input-0"
         name_el = None
         for sel in [
             "input[formcontrolname='fullName']",
@@ -651,9 +638,7 @@ class GeminiEnterpriseProcessor(threading.Thread):
         else:
             self._log("Name form not found, proceeding...", "WARNING")
 
-        # ── Step 14: Klik Agree & get started ─────────────────────────────
         self._log("Step 11: Clicking 'Agree & get started'")
-        # EXACT: span.mdc-button__label dengan teks 'Agree & get started'
         agree_clicked = False
         for sel in [
             ".mdc-button__label",
@@ -665,7 +650,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 for el in els:
                     txt = (el.text or "").strip()
                     if "agree" in txt.lower() or "get started" in txt.lower():
-                        # Klik parent button jika ini span
                         try:
                             btn = el.find_element(By.XPATH, "./ancestor::button")
                             self._human_click(driver, btn)
@@ -691,14 +675,11 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 except Exception:
                     pass
 
-        # ── Step 15: Tunggu 'Signing you in...' hilang ─────────────────────
         self._log("Step 12: Waiting for 'Signing you in...' to disappear")
-        # EXACT: h1._ngcontent-...[class="title"] dengan teks 'Signing you in...'
         self._wait_gone(driver, "h1.title", timeout=60)
         self._log("Signing in completed.")
         time.sleep(random.uniform(2, 3))
 
-        # ── Step 7: Initial setup ──────────────────────────────────────────
         self._log("Step 13: Initial setup")
         self._initial_setup(driver)
         self._log("Account registration and setup completed successfully!")
@@ -706,10 +687,8 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
     def _submit_otp(self, driver, otp: str) -> bool:
         """
-        EXACT dari inspect: input.J6L5wc, jsname="ovqh0b", name="pinInput"
-        opacity:0 (hidden visually tapi functional)
+        EXACT: input.J6L5wc, jsname="ovqh0b", name="pinInput" - opacity:0
         """
-        # Selector exact dari inspect
         for sel in [
             "input.J6L5wc",
             "input[jsname='ovqh0b']",
@@ -717,7 +696,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
         ]:
             try:
                 el = driver.find_element(By.CSS_SELECTOR, sel)
-                # Input ini opacity:0, pakai JS untuk set value
                 driver.execute_script(
                     "arguments[0].value = arguments[1];"
                     "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
@@ -726,7 +704,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 )
                 self._log(f"OTP entered via {sel}: {otp}")
                 time.sleep(0.3)
-                # Juga send_keys sebagai backup
                 try:
                     el.send_keys(otp)
                 except Exception:
@@ -735,7 +712,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
             except Exception:
                 pass
 
-        # Fallback: coba semua input type text
         try:
             inputs = driver.find_elements(By.CSS_SELECTOR,
                 "input[type='text'], input[autocomplete='one-time-code']")
@@ -757,14 +733,12 @@ class GeminiEnterpriseProcessor(threading.Thread):
         Step 16-18:
           16. Tutup popup 'I'll do this later' -> span.touch
           17. Klik tools button -> md-icon: page_info
-          18. Pilih 'Create videos with Veo'
+          18. Pilih 'Create videos with Veo' -> div[slot='headline']
         """
-        # Step 16: Tutup popup - span.touch
         self._log("Closing welcome popup ('I'll do this later')...")
         try:
             WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "span.touch"))
-            )
+                EC.presence_of_element_located((By.CSS_SELECTOR, "span.touch")))
             el = driver.find_element(By.CSS_SELECTOR, "span.touch")
             self._js_click(driver, el)
             self._log("Clicked 'I'll do this later' (span.touch)")
@@ -774,8 +748,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._log(f"Popup dismiss error: {e}", "WARNING")
         time.sleep(random.uniform(1, 2))
 
-        # Step 17: Klik tools button
-        # EXACT: md-icon dengan slot="icon" teks "page_info"
         self._log("Clicking tools button (page_info icon)...")
         tools_clicked = False
         for sel in [
@@ -797,12 +769,10 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 pass
 
         if not tools_clicked:
-            # Cari berdasarkan md-icon teks page_info
             try:
                 icons = driver.find_elements(By.TAG_NAME, "md-icon")
                 for icon in icons:
                     if "page_info" in (icon.text or "").strip():
-                        # Klik parent button
                         try:
                             btn = icon.find_element(
                                 By.XPATH, "./ancestor::button | ./ancestor::md-icon-button")
@@ -822,24 +792,20 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
         time.sleep(random.uniform(1, 1.5))
 
-        # Step 18: Pilih 'Create videos with Veo'
-        # EXACT: div[slot='headline'] teks 'Create videos with Veo'
         self._log("Selecting 'Create videos with Veo'...")
         veo_clicked = False
-        for sel in [
-            "div[slot='headline']",
-            "[slot='headline']",
-        ]:
+        for sel in ["div[slot='headline']", "[slot='headline']"]:
             try:
                 els = driver.find_elements(By.CSS_SELECTOR, sel)
                 for el in els:
                     txt = (el.text or "").strip().lower()
                     if "create video" in txt or "veo" in txt:
-                        # Klik parent item
                         try:
                             item = el.find_element(
                                 By.XPATH,
-                                "./ancestor::md-menu-item | ./ancestor::li | ./ancestor::[role='menuitem']"
+                                "./ancestor::md-menu-item | "
+                                "./ancestor::li | "
+                                "./ancestor::*[@role='menuitem']"
                             )
                             self._human_click(driver, item)
                         except Exception:
@@ -853,13 +819,11 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 pass
 
         if not veo_clicked:
-            # Fallback text search
             for el in driver.find_elements(By.XPATH,
-                    "//*[contains(translate(text(),"
-                    "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')"
-                    ",\"create video\") or contains(translate(text(),"
-                    "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')"
-                    ",\"veo\")]"):
+                    "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                    "'abcdefghijklmnopqrstuvwxyz'),'create video') or "
+                    "contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                    "'abcdefghijklmnopqrstuvwxyz'),'veo')]"):
                 try:
                     if el.is_displayed():
                         self._human_click(driver, el)
@@ -882,15 +846,9 @@ class GeminiEnterpriseProcessor(threading.Thread):
             except Exception:
                 pass
 
-        self._progress(
-            int((prompt_num / total) * 100),
-            f"Prompt {prompt_num}/{total}"
-        )
+        self._progress(int((prompt_num / total) * 100), f"Prompt {prompt_num}/{total}")
 
-        # ── Step 19: Input prompt ke ProseMirror editor ──────────────────
         self._log(f"Step 14: Inputting prompt {prompt_num}/{total}")
-        # EXACT: p > span.placeholder.ProseMirror-widget
-        # Editor parent: div[contenteditable] / ProseMirror
         prompt_el = None
         for sel in [
             "div.ProseMirror",
@@ -909,17 +867,14 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._log("Prompt input not found", "ERROR")
             return "error"
 
-        # Klik editor, clear, type
         driver.execute_script("arguments[0].click();", prompt_el)
         time.sleep(0.3)
-        # Select all + delete untuk clear ProseMirror
         ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(
             Keys.CONTROL).perform()
         time.sleep(0.2)
         ActionChains(driver).send_keys(Keys.DELETE).perform()
         time.sleep(0.2)
 
-        # Type prompt
         ac = ActionChains(driver)
         for char in prompt:
             ac.send_keys(char)
@@ -928,23 +883,17 @@ class GeminiEnterpriseProcessor(threading.Thread):
         self._log("Prompt entered")
         time.sleep(random.uniform(0.7, 1.2))
 
-        # Tekan Enter untuk generate
         self._log("Pressing Enter to generate...")
         ActionChains(driver).send_keys(Keys.RETURN).perform()
         self._log("Generation started")
         time.sleep(random.uniform(2, 3))
 
-        # ── Step 20: Tunggu thinking hilang + video render ───────────────
         return self._wait_for_generation(driver, prompt_num)
 
     def _wait_for_generation(self, driver, prompt_num: int) -> str:
         """
-        Step 20:
-          - Tunggu div.thinking-message hilang (EXACT dari inspect)
-          - Deteksi rate limit jika thinking < 5s
-          - Tunggu video render
+        Tunggu div.thinking-message hilang, deteksi rate limit, tunggu video render.
         """
-        # Tunggu thinking-message muncul dulu
         thinking_appeared = False
         thinking_start    = None
         for _ in range(10):
@@ -959,7 +908,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 pass
             time.sleep(0.5)
 
-        # Cek rate limit: thinking hilang terlalu cepat
         if thinking_appeared and thinking_start:
             time.sleep(2)
             try:
@@ -972,12 +920,10 @@ class GeminiEnterpriseProcessor(threading.Thread):
             except Exception:
                 pass
 
-        # Tunggu thinking-message hilang
         self._log("Waiting for thinking to complete...")
         self._wait_gone(driver, "div.thinking-message", timeout=120)
         self._log("Thinking completed. Waiting for video render...")
 
-        # Tunggu video render / download button muncul
         start = time.time()
         while time.time() - start < VIDEO_GEN_TIMEOUT:
             if self._cancelled:
@@ -987,24 +933,29 @@ class GeminiEnterpriseProcessor(threading.Thread):
             try:
                 src = driver.page_source.lower()
 
-                # Cek rate limit
                 if any(k in src for k in [
                     "rate limit", "quota exceeded", "try again later", "too many requests"
                 ]):
                     self._log("Rate limit message on page")
                     return "rate_limit"
 
-                # Cek download button muncul
-                dl_btns = driver.find_elements(By.CSS_SELECTOR,
-                    "button[aria-label*='download' i], a[download], "
-                    "button[aria-label*='Download' i]")
+                # EXACT dari inspect: button#button[aria-label="Download video file"]
+                dl_btns = driver.find_elements(
+                    By.CSS_SELECTOR,
+                    "button#button[aria-label='Download video file']"
+                )
                 if dl_btns and any(b.is_displayed() for b in dl_btns):
                     break
 
-                # Cek tombol dengan teks download
-                for btn in driver.find_elements(By.TAG_NAME, "button"):
-                    if "download" in (btn.text or "").lower() and btn.is_displayed():
-                        break
+                # Fallback selector
+                dl_btns = driver.find_elements(
+                    By.CSS_SELECTOR,
+                    "button[aria-label*='Download' i], "
+                    "button[aria-label*='download' i], "
+                    "a[download]"
+                )
+                if dl_btns and any(b.is_displayed() for b in dl_btns):
+                    break
 
                 if elapsed % 15 == 0 and elapsed > 0:
                     self._log(f"Still rendering... ({elapsed}s)")
@@ -1021,75 +972,184 @@ class GeminiEnterpriseProcessor(threading.Thread):
         return self._download_video(driver, prompt_num)
 
     def _download_video(self, driver, prompt_num: int) -> str:
-        """Step 21: Klik download, tunggu file."""
-        self._log("Step 15: Downloading video...")
-        try:
-            dl_btn = None
-            for sel in [
-                "button[aria-label*='download' i]",
-                "button[aria-label*='Download' i]",
-                "a[download]",
-            ]:
+        """
+        Step 21 - Download video:
+
+        21a: Klik tombol download utama
+             EXACT: <button id="button" class="icon-button filled"
+                           aria-label="Download video file">
+
+        21b: Tunggu popup konfirmasi muncul, lalu klik tombol konfirmasi
+             EXACT: <button id="button" class="button"> (di dalam popup/dialog)
+                    -> Ini Web Component, tidak punya text di DOM biasa
+                    -> Cari via parent container (popup/dialog) yang muncul setelah klik
+        """
+        self._log("Step 21a: Clicking download button...")
+        dl_btn = None
+
+        # Selector EXACT dari inspect: button#button[aria-label="Download video file"]
+        for sel in [
+            "button#button[aria-label='Download video file']",
+            "button[aria-label='Download video file']",
+            "button#button.icon-button[aria-label*='Download' i]",
+            "button#button[aria-label*='Download' i]",
+            "button.icon-button[aria-label*='Download' i]",
+            "button[aria-label*='download' i]",
+            "a[download]",
+        ]:
+            try:
                 els = driver.find_elements(By.CSS_SELECTOR, sel)
                 for el in els:
                     if el.is_displayed():
                         dl_btn = el
+                        self._log(f"Download button found: {sel}")
                         break
                 if dl_btn:
                     break
-
-            if not dl_btn:
-                for btn in driver.find_elements(By.TAG_NAME, "button"):
-                    if "download" in (btn.text or "").lower() and btn.is_displayed():
-                        dl_btn = btn
-                        break
-
-            if not dl_btn:
-                self._log("Download button not found", "ERROR")
-                return "error"
-
-            self._human_click(driver, dl_btn)
-            self._log("Download button clicked")
-            time.sleep(random.uniform(1, 2))
-
-            # Konfirmasi download popup jika ada
-            try:
-                for el in driver.find_elements(By.CSS_SELECTOR, "button"):
-                    if any(w in (el.text or "").lower() for w in ["download", "confirm", "save"])\
-                            and el.is_displayed():
-                        self._human_click(driver, el)
-                        self._log("Download confirmed")
-                        break
             except Exception:
                 pass
 
-            # Tunggu file muncul di output dir
-            for _ in range(120):
-                time.sleep(1)
+        if not dl_btn:
+            self._log("Download button not found", "ERROR")
+            self._debug_dump(driver, "no_download_btn")
+            return "error"
+
+        # Scroll ke element, pastikan visible
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block:'center'});", dl_btn)
+        time.sleep(0.5)
+
+        # Klik dengan JS (lebih reliable untuk Web Components)
+        self._js_click(driver, dl_btn)
+        self._log("Download button clicked (button#button aria-label='Download video file')")
+        time.sleep(random.uniform(1.5, 2.5))
+
+        # ──────────────────────────────────────────────────
+        # Step 21b: Tunggu popup konfirmasi -> klik button konfirmasi
+        # EXACT: <button id="button" class="button"> di dalam popup/dialog
+        # Popup ini adalah Web Component -> tidak ada text di DOM reguler
+        # Strategy:
+        #   1. Cari popup/dialog container yang muncul baru
+        #   2. Di dalam container, cari button#button.button
+        #   3. Fallback: button#button.button di seluruh halaman (yang baru muncul)
+        # ──────────────────────────────────────────────────
+        self._log("Step 21b: Waiting for download confirmation popup...")
+        confirm_clicked = False
+
+        # Tunggu popup/dialog container muncul (max 5 detik)
+        POPUP_CONTAINERS = [
+            "md-dialog",
+            "[role='dialog']",
+            "[role='alertdialog']",
+            ".dialog",
+            ".modal",
+            "dialog",
+        ]
+        popup_el = None
+        deadline = time.time() + 5
+        while time.time() < deadline and not popup_el:
+            for sel in POPUP_CONTAINERS:
+                try:
+                    els = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for el in els:
+                        if el.is_displayed():
+                            popup_el = el
+                            self._log(f"Popup container found: {sel}")
+                            break
+                    if popup_el:
+                        break
+                except Exception:
+                    pass
+            if not popup_el:
+                time.sleep(0.3)
+
+        if popup_el:
+            # Cari button#button.button di dalam popup
+            # EXACT dari inspect: <button id="button" class="button">
+            for sel in [
+                "button#button.button",
+                "button#button",
+                "button.button",
+            ]:
+                try:
+                    btn = popup_el.find_element(By.CSS_SELECTOR, sel)
+                    if btn.is_displayed():
+                        self._js_click(driver, btn)
+                        self._log(f"Confirmation button clicked in popup: {sel}")
+                        confirm_clicked = True
+                        break
+                except Exception:
+                    pass
+        else:
+            # Popup tidak terdeteksi via container
+            # Fallback: cari button#button.button di seluruh halaman
+            self._log("Popup container not found, searching whole page...", "WARNING")
+            for sel in [
+                "button#button.button",
+                "button#button",
+                "button.button",
+            ]:
+                try:
+                    els = driver.find_elements(By.CSS_SELECTOR, sel)
+                    # Ambil yang BUKAN tombol download utama (sudah diklik)
+                    for btn in els:
+                        aria = (btn.get_attribute("aria-label") or "").lower()
+                        cls  = (btn.get_attribute("class") or "").lower()
+                        # Skip tombol download utama (icon-button filled)
+                        if "icon-button" in cls or "download" in aria:
+                            continue
+                        if btn.is_displayed():
+                            self._js_click(driver, btn)
+                            self._log(f"Confirmation button clicked (fallback): {sel}")
+                            confirm_clicked = True
+                            break
+                    if confirm_clicked:
+                        break
+                except Exception:
+                    pass
+
+        if not confirm_clicked:
+            # Popup mungkin tidak ada / langsung download
+            self._log("No confirmation popup detected - download may proceed directly", "WARNING")
+
+        time.sleep(random.uniform(1, 2))
+
+        # ──────────────────────────────────────────────────
+        # Tunggu file mp4/webm muncul di output dir
+        # ──────────────────────────────────────────────────
+        self._log("Waiting for video file to appear...")
+        for _ in range(120):
+            time.sleep(1)
+            try:
                 files = [
                     f for f in os.listdir(self.output_dir)
-                    if f.endswith((".mp4", ".webm")) and not f.endswith(".crdownload")
+                    if f.lower().endswith((".mp4", ".webm"))
+                    and not f.endswith(".crdownload")
+                    and not f.endswith(".tmp")
                 ]
-                if files:
-                    newest = max(
-                        [os.path.join(self.output_dir, f) for f in files],
-                        key=os.path.getmtime
-                    )
-                    fname = f"ReenzAuto_G-Business_{prompt_num}_{int(time.time()*1000)}.mp4"
-                    dest  = os.path.join(self.output_dir, fname)
-                    try:
-                        if newest != dest:
-                            os.rename(newest, dest)
-                        newest = dest
-                    except Exception:
-                        pass
-                    self._log(f"Saved: {os.path.basename(newest)}")
-                    self._log(f"Successfully processed prompt {prompt_num}")
-                    return "ok"
+            except Exception:
+                files = []
 
-            self._log("File did not appear after 120s", "WARNING")
-            return "error"
+            if files:
+                newest = max(
+                    [os.path.join(self.output_dir, f) for f in files],
+                    key=os.path.getmtime
+                )
+                fname = (
+                    f"ReenzAuto_G-Business_{prompt_num}_"
+                    f"{int(time.time() * 1000)}.mp4"
+                )
+                dest = os.path.join(self.output_dir, fname)
+                try:
+                    if newest != dest:
+                        os.rename(newest, dest)
+                    newest = dest
+                except Exception:
+                    pass
+                self._log(f"Video saved: {os.path.basename(newest)}")
+                self._log(f"Successfully processed prompt {prompt_num}")
+                return "ok"
 
-        except Exception as e:
-            self._log(f"Download error: {e}", "ERROR")
-            return "error"
+        self._log("File did not appear after 120s", "WARNING")
+        self._debug_dump(driver, "no_file_after_download")
+        return "error"
