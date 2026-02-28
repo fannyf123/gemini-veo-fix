@@ -7,11 +7,11 @@ Otomasi mailticking.com sesuai tampilan nyata:
   +------------------------------------------+
   | Your Temp Email is Ready                 |
   | [doalbon567@gongjua.com] [change v]      |
-  |  [ ] abc@domain.com      <- uncheck     |
+  |  [x] abc@domain.com      <- HANYA ini   |
   |  [ ] a.b.c@gmail.com     <- uncheck     |
   |  [ ] abc@gmail.com       <- uncheck     |
   |  [ ] abc+d@gmail.com     <- uncheck     |
-  |  [x] abc@googlemail.com  <- HANYA ini   |
+  |  [ ] abc@googlemail.com  <- uncheck     |
   |          [Activate]                     |
   +------------------------------------------+
 
@@ -24,15 +24,15 @@ Otomasi mailticking.com sesuai tampilan nyata:
   +------------------------------------------+
 
 EXACT ELEMENTS dari inspect:
-  Tombol Change (klik berulang sampai email @googlemail.com):
+  Tombol Change (klik berulang sampai email BUKAN @gmail/@googlemail):
     <button class="btn btn-info" type="button" id="modalChange">
       <i class="fa fa-random"></i>
       <span class="d-none d-md-inline"> Change</span>
     </button>
 
-  Checkbox googlemail:
-    <input class="form-check-input type" type="checkbox" name="type" id="type3" value="3" checked="">
-    <label class="form-check-label" for="type3">abc@googlemail.com</label>
+  Checkbox domain (TARGET - HANYA ini yang dicentang):
+    <input class="form-check-input type" type="checkbox" name="type" id="type4" value="4" checked="">
+    <label class="form-check-label" for="type4">abc@<b class="red">domain</b>.com</label>
 
   Activate button:
     <a href="javascript:;" class="btn btn-warning mx-auto btn-lg activeBtn">
@@ -63,11 +63,20 @@ except ImportError:
 
 MAILTICKING_URL = "https://mailticking.com"
 
+# Domain yang TIDAK boleh dipakai (Google akan reject)
+BANNED_DOMAINS = {"@gmail.com", "@googlemail.com"}
+
 OTP_BG_COLORS = {"#eaf2ff", "#e8f0fe", "#f1f8ff", "#e3f2fd", "#f0f4ff", "#dce8fc"}
 OTP_TEXT_COLORS = {
     "#1c3a70", "#1a73e8", "#4285f4", "#1558d6", "#1967d2",
     "#185abc", "#174ea6", "#0d47a1",
 }
+
+
+def _is_banned_email(email: str) -> bool:
+    """Return True jika email berformat @gmail.com atau @googlemail.com."""
+    low = email.lower().strip()
+    return any(low.endswith(d) for d in BANNED_DOMAINS)
 
 
 def _extract_otp_from_html(html: str) -> Optional[str]:
@@ -214,8 +223,8 @@ class MailtickingClient:
     def get_fresh_email(self, driver) -> str:
         """
         Step 3-6:
-          3. Klik button#modalChange berulang sampai email @googlemail.com
-          4. Uncheck semua KECUALI input#type3 (abc@googlemail.com)
+          3. Klik button#modalChange berulang sampai email BUKAN @gmail/@googlemail
+          4. Centang HANYA input#type4 (abc@domain.com), uncheck semua lainnya
           5. Klik a.activeBtn (Activate)
           6. Tunggu halaman reload -> baca email dari input bar
         """
@@ -225,11 +234,11 @@ class MailtickingClient:
         else:
             self._log("Modal not detected, proceeding anyway...", "WARNING")
 
-        # Step 3: Loop klik Change sampai email field = @googlemail.com
-        email = self._click_change_until_googlemail(driver)
-        self._log(f"Googlemail email ready: {email}")
+        # Step 3: Loop klik Change sampai email bukan @gmail / @googlemail
+        email = self._click_change_until_non_gmail(driver)
+        self._log(f"Non-gmail email ready: {email}")
 
-        # Step 4: Configure checkboxes
+        # Step 4: Centang HANYA type4 (abc@domain.com)
         self._configure_checkboxes(driver)
         time.sleep(0.5)
 
@@ -247,9 +256,7 @@ class MailtickingClient:
 
     # -------------------------------------------------------------------------
     def _read_email_from_modal(self, driver) -> str:
-        """
-        Baca email yang sedang tampil di field modal (sebelum activate).
-        """
+        """Baca email yang sedang tampil di field modal (sebelum activate)."""
         for sel in [
             ".modal input[type='text']",
             ".modal input[type='email']",
@@ -267,7 +274,6 @@ class MailtickingClient:
                     return val
             except Exception:
                 pass
-        # Fallback: ambil dari page source (value="...@...")
         try:
             m = re.search(
                 r'value="([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})"',
@@ -279,22 +285,24 @@ class MailtickingClient:
             pass
         return ""
 
-    def _click_change_until_googlemail(
+    def _click_change_until_non_gmail(
         self, driver, max_attempts: int = 20
     ) -> str:
         """
-        Klik button#modalChange berulang sampai email field berisi @googlemail.com.
+        Klik button#modalChange berulang sampai email field BUKAN @gmail.com
+        maupun @googlemail.com (karena Google register butuh non-Gmail address).
 
         EXACT: <button class="btn btn-info" type="button" id="modalChange">
 
+        Target: abc@domain.com (id=type4) -> domain selain gmail/googlemail
+
         Alur per iterasi:
           1. Baca email saat ini
-          2. Jika sudah @googlemail.com -> selesai
+          2. Jika bukan @gmail.com DAN bukan @googlemail.com -> selesai
           3. Klik Change button
-          4. Tunggu email di field berubah (beda dari sebelumnya)
+          4. Tunggu email di field berubah
           5. Ulangi sampai max_attempts
         """
-        # Selector Change button, urutan prioritas
         CHANGE_SELECTORS = [
             "button#modalChange",
             "#modalChange",
@@ -309,7 +317,6 @@ class MailtickingClient:
                         return el
                 except Exception:
                     pass
-            # Fallback: button.btn-info dengan teks 'change'
             try:
                 for btn in driver.find_elements(By.CSS_SELECTOR, "button.btn-info"):
                     if "change" in (btn.text or "").lower() and btn.is_displayed():
@@ -321,18 +328,17 @@ class MailtickingClient:
         for attempt in range(1, max_attempts + 1):
             current_email = self._read_email_from_modal(driver)
 
-            # Cek apakah sudah @googlemail.com
-            if "@googlemail.com" in current_email.lower():
+            # Kondisi sukses: email ada dan bukan banned domain
+            if current_email and not _is_banned_email(current_email):
                 self._log(
-                    f"Email is @googlemail.com on attempt {attempt}: {current_email}")
+                    f"Email valid (non-gmail) on attempt {attempt}: {current_email}")
                 return current_email
 
+            reason = "(kosong)" if not current_email else f"'{current_email}' adalah @gmail/@googlemail"
             self._log(
-                f"Attempt {attempt}/{max_attempts}: "
-                f"email '{current_email}' bukan @googlemail.com, klik Change..."
+                f"Attempt {attempt}/{max_attempts}: {reason}, klik Change..."
             )
 
-            # Cari dan klik Change button
             btn = _find_change_btn()
             if not btn:
                 self._log("Change button tidak ditemukan", "WARNING")
@@ -340,16 +346,14 @@ class MailtickingClient:
 
             self._js_click(driver, btn)
 
-            # Tunggu email di field berubah (max 3 detik polling)
+            # Tunggu email berubah (max 3 detik polling)
             deadline = time.time() + 3
             while time.time() < deadline:
                 time.sleep(0.4)
                 new_email = self._read_email_from_modal(driver)
                 if new_email and new_email != current_email:
-                    break  # email sudah ganti, lanjut cek lagi
+                    break
 
-        # Jika sudah max_attempts tapi belum @googlemail.com,
-        # kembalikan email terakhir dan lanjut saja
         last_email = self._read_email_from_modal(driver)
         self._log(
             f"Max attempts reached. Last email: {last_email}", "WARNING")
@@ -358,9 +362,15 @@ class MailtickingClient:
     # -------------------------------------------------------------------------
     def _configure_checkboxes(self, driver):
         """
+        Centang HANYA id="type4" (abc@domain.com).
+        Uncheck semua checkbox lain (type1, type2, type3, dll).
+
         EXACT dari inspect:
-          id="type3" = abc@googlemail.com -> HARUS checked
-          Semua lain -> HARUS unchecked
+          <input class="form-check-input type" type="checkbox"
+                 name="type" id="type4" value="4" checked="">
+          <label class="form-check-label" for="type4">
+            abc@<b class="red">domain</b>.com
+          </label>
         """
         try:
             checkboxes = driver.find_elements(
@@ -375,9 +385,9 @@ class MailtickingClient:
             for cb in checkboxes:
                 try:
                     cb_id    = cb.get_attribute("id") or ""
-                    cb_value = (cb.get_attribute("value") or "").lower()
-                    cb_name  = (cb.get_attribute("name")  or "").lower()
+                    cb_value = (cb.get_attribute("value") or "").strip()
 
+                    # Ambil label text untuk deteksi
                     label_text = ""
                     if cb_id:
                         try:
@@ -393,15 +403,27 @@ class MailtickingClient:
                         except Exception:
                             pass
 
-                    combined = label_text + cb_value + cb_name + cb_id
-                    is_googlemail = (cb_id == "type3") or ("googlemail" in combined)
+                    # id="type4" ATAU value="4" ATAU label mengandung "domain"
+                    # dan TIDAK mengandung "gmail" atau "googlemail"
+                    is_domain = (
+                        cb_id == "type4"
+                        or cb_value == "4"
+                        or (
+                            "domain" in label_text
+                            and "gmail" not in label_text
+                            and "googlemail" not in label_text
+                        )
+                    )
+
                     currently_checked = cb.is_selected()
 
-                    if is_googlemail:
+                    if is_domain:
                         if not currently_checked:
                             self._js_click(driver, cb)
                             time.sleep(0.2)
-                            self._log("Checked: abc@googlemail.com")
+                            self._log(f"Checked: abc@domain.com (id={cb_id})")
+                        else:
+                            self._log(f"Already checked: abc@domain.com (id={cb_id})")
                     else:
                         if currently_checked:
                             self._js_click(driver, cb)
@@ -412,7 +434,7 @@ class MailtickingClient:
                 except Exception:
                     continue
 
-            self._log("Checkboxes configured: only googlemail.com selected")
+            self._log("Checkboxes configured: only abc@domain.com (type4) selected")
         except Exception as e:
             self._log(f"Checkbox config error: {e}", "WARNING")
 
