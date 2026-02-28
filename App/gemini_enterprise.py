@@ -23,7 +23,7 @@ Alur lengkap (EXACT selectors dari inspect element):
   Step 14 : Klik span.mdc-button__label 'Agree & get started'
   Step 15 : Tunggu h1.title 'Signing you in...' hilang
   Step 16 : Tutup popup 'I'll do this later'
-             EXACT: <button id="button" class="button"> (Web Component)
+             -> Web Component Shadow DOM: pakai JS rekursif shadowRoot traversal
   Step 17 : Klik tools button (md-icon: page_info)
   Step 18 : Pilih 'Create videos with Veo'
   Step 19 : Input prompt ke ProseMirror editor - tekan Enter
@@ -72,10 +72,9 @@ VIDEO_GEN_TIMEOUT     = 600
 POLLING_INTERVAL      = 8
 MAX_ACCOUNT_RETRY     = 3
 MAX_TAB_RETRY         = 3
-MAX_EMAIL_SUBMIT_RETRY = 3   # max retry jika terjadi error page setelah submit email
+MAX_EMAIL_SUBMIT_RETRY = 3
 RATE_LIMIT_THINKING_THRESHOLD = 5.0
 
-# Keyword yang menandakan halaman error setelah submit email
 EMAIL_SUBMIT_ERROR_KEYWORDS = [
     "couldn't sign you in",
     "couldn't sign in",
@@ -90,6 +89,109 @@ EMAIL_SUBMIT_ERROR_KEYWORDS = [
     "not supported",
     "browser not supported",
 ]
+
+# JavaScript: rekursif traversal semua shadow root untuk cari button 'I'll do this later'
+# Mencari button yang:
+#   - id="button" atau class mengandung "button"
+#   - BUKAN icon-button / download button
+#   - Teks di dalam shadow slot mengandung 'later' / 'skip' / 'dismiss' / 'not now'
+#   - Atau: parent custom element mengandung teks tersebut di outerHTML
+_JS_FIND_DISMISS_BTN = """
+(function() {
+    var KEYWORDS = ['later', 'skip', 'dismiss', 'not now', 'no thanks'];
+    var SKIP_ARIA = ['download', 'close', 'menu', 'search'];
+
+    function textOf(el) {
+        // Gabungkan innerText + semua slot children innerText
+        var t = (el.innerText || el.textContent || '').toLowerCase().trim();
+        if (!t && el.shadowRoot) {
+            var slots = el.shadowRoot.querySelectorAll('slot');
+            slots.forEach(function(slot) {
+                var assigned = slot.assignedNodes ? slot.assignedNodes({flatten:true}) : [];
+                assigned.forEach(function(node) {
+                    t += (node.textContent || '').toLowerCase();
+                });
+            });
+        }
+        return t;
+    }
+
+    function hasKeyword(txt) {
+        return KEYWORDS.some(function(k) { return txt.indexOf(k) !== -1; });
+    }
+
+    function isSkip(el) {
+        var aria = (el.getAttribute('aria-label') || '').toLowerCase();
+        var cls  = (el.getAttribute('class') || '').toLowerCase();
+        return SKIP_ARIA.some(function(k) { return aria.indexOf(k) !== -1; })
+            || cls.indexOf('icon-button') !== -1;
+    }
+
+    function findInRoot(root) {
+        // Cari semua button candidate
+        var candidates = root.querySelectorAll(
+            'button#button, button.button, [id="button"], gds-button, gmp-button'
+        );
+        for (var i = 0; i < candidates.length; i++) {
+            var el = candidates[i];
+            if (isSkip(el)) continue;
+
+            // Cek teks el itu sendiri
+            var t = textOf(el);
+            if (hasKeyword(t)) return el;
+
+            // Cek outerHTML parent custom element (bisa jadi teks ada di light DOM)
+            var parent = el.parentElement;
+            while (parent && parent !== document.body) {
+                var pt = (parent.outerHTML || '').toLowerCase();
+                if (hasKeyword(pt) && !isSkip(el)) return el;
+                // Hanya naik 3 level
+                if (parent.parentElement === parent) break;
+                parent = parent.parentElement;
+            }
+        }
+
+        // Rekursif ke shadow roots
+        var all = root.querySelectorAll('*');
+        for (var j = 0; j < all.length; j++) {
+            if (all[j].shadowRoot) {
+                var found = findInRoot(all[j].shadowRoot);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+
+    return findInRoot(document);
+})();
+"""
+
+# JavaScript: cari semua button di shadow DOM, kembalikan array info
+_JS_LIST_BUTTONS = """
+(function() {
+    var result = [];
+    function scan(root, depth) {
+        if (depth > 10) return;
+        var btns = root.querySelectorAll('button, gds-button, gmp-button');
+        btns.forEach(function(b) {
+            result.push({
+                tag: b.tagName,
+                id: b.id || '',
+                cls: b.getAttribute('class') || '',
+                aria: b.getAttribute('aria-label') || '',
+                text: (b.innerText || b.textContent || '').trim().substring(0, 80),
+                visible: b.offsetParent !== null
+            });
+        });
+        var all = root.querySelectorAll('*');
+        all.forEach(function(el) {
+            if (el.shadowRoot) scan(el.shadowRoot, depth + 1);
+        });
+    }
+    scan(document, 0);
+    return JSON.stringify(result);
+})();
+"""
 
 CHROME_PATHS = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -410,35 +512,21 @@ class GeminiEnterpriseProcessor(threading.Thread):
             element.click()
 
     def _is_error_page(self, driver) -> bool:
-        """
-        Deteksi halaman error setelah submit email:
-        - "Couldn't sign you in"
-        - "disallowed_useragent"
-        - "access_denied"
-        - Error 400 / 403
-        - Halaman stuck (tidak ada input OTP / email input)
-        """
         try:
             src = driver.page_source.lower()
             url = driver.current_url.lower()
-
-            # Cek keyword error di page source
             if any(k in src for k in EMAIL_SUBMIT_ERROR_KEYWORDS):
                 return True
-
-            # Cek URL error parameter
             if any(k in url for k in [
                 "error=", "disallowed", "access_denied",
                 "authError", "servicerestricted"
             ]):
                 return True
-
         except Exception:
             pass
         return False
 
     def _navigate_to_gemini_home(self, driver):
-        """Navigate ke GEMINI_HOME_URL dan tunggu halaman load."""
         self._log(f"Navigating to {GEMINI_HOME_URL} ...")
         try:
             driver.get(GEMINI_HOME_URL)
@@ -547,7 +635,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
             self._log("Failed to open new tab", "ERROR")
             return False
 
-        # Step 3-4: Submit email dengan retry jika terjadi error page
         self._log("Step 3: Entering email and submitting (with error page retry)")
         submitted = self._submit_email_with_retry(driver, email)
         if not submitted:
@@ -695,21 +782,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
 
     # ── Submit email with error page retry ───────────────────────────────
     def _submit_email_with_retry(self, driver, email: str) -> bool:
-        """
-        Submit email ke Gemini Business dengan retry otomatis jika muncul error page.
-
-        Alur per attempt:
-          1. Navigate ke GEMINI_HOME_URL
-          2. Tunggu input email muncul
-          3. Ketik email
-          4. Klik 'Continue with email'
-          5. Tunggu 3-5 detik
-          6. Cek apakah halaman adalah error page (couldn't sign in, dll)
-             -> Jika error: log warning, navigate ulang ke GEMINI_HOME_URL, retry
-             -> Jika OK: return True
-
-        Max retry: MAX_EMAIL_SUBMIT_RETRY (default 3)
-        """
         EMAIL_SELECTORS = [
             "input#email-input",
             "input[jsname='YPqjbf']",
@@ -725,13 +797,9 @@ class GeminiEnterpriseProcessor(threading.Thread):
         ]
 
         for attempt in range(1, MAX_EMAIL_SUBMIT_RETRY + 1):
-            self._log(
-                f"Step 3-4: Submit email attempt {attempt}/{MAX_EMAIL_SUBMIT_RETRY}")
-
-            # Navigate ke Gemini home (setiap attempt)
+            self._log(f"Step 3-4: Submit email attempt {attempt}/{MAX_EMAIL_SUBMIT_RETRY}")
             self._navigate_to_gemini_home(driver)
 
-            # Cari input email
             email_el = None
             for sel in EMAIL_SELECTORS:
                 el = self._wait_for(driver, sel, timeout=15)
@@ -746,12 +814,10 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 time.sleep(2)
                 continue
 
-            # Ketik email
             self._human_type(driver, email_el, email)
             self._log(f"Email entered: {email}")
             time.sleep(random.uniform(0.8, 1.5))
 
-            # Klik submit
             submit_el = None
             for sel in SUBMIT_SELECTORS:
                 try:
@@ -770,24 +836,20 @@ class GeminiEnterpriseProcessor(threading.Thread):
                 email_el.send_keys(Keys.RETURN)
                 self._log("Pressed Enter to submit email")
 
-            # Tunggu halaman setelah submit
             time.sleep(random.uniform(3, 5))
 
-            # Deteksi error page
             if self._is_error_page(driver):
                 self._log(
                     f"Error page detected after email submit (attempt {attempt}). "
-                    f"Navigating back to Gemini home...",
+                    "Navigating back to Gemini home...",
                     "WARNING"
                 )
                 self._debug_dump(driver, f"email_submit_error_{attempt}")
-                # Jika masih ada attempt tersisa, lanjut loop
                 if attempt < MAX_EMAIL_SUBMIT_RETRY:
                     time.sleep(random.uniform(2, 3))
                     continue
                 else:
-                    self._log(
-                        "All email submit attempts failed due to error page", "ERROR")
+                    self._log("All email submit attempts failed due to error page", "ERROR")
                     return False
             else:
                 self._log(
@@ -839,12 +901,6 @@ class GeminiEnterpriseProcessor(threading.Thread):
         return False
 
     def _initial_setup(self, driver):
-        """
-        Step 16-18:
-          16. Tutup popup 'I'll do this later'
-          17. Klik tools button -> md-icon: page_info
-          18. Pilih 'Create videos with Veo' -> div[slot='headline']
-        """
         self._log("Step 16: Closing 'I'll do this later' popup...")
         dismissed = self._dismiss_later_popup(driver)
         if dismissed:
@@ -941,67 +997,110 @@ class GeminiEnterpriseProcessor(threading.Thread):
         time.sleep(random.uniform(1, 2))
         self._log("Initial setup completed!")
 
+    # ── Dismiss 'I'll do this later' popup ────────────────────────────────
     def _dismiss_later_popup(self, driver) -> bool:
         """
-        Tutup popup 'I'll do this later' setelah login.
-        EXACT: <button id="button" class="button"> (Web Component dengan <slot>)
-        Strategy:
-          1. Cek page source ada keyword 'later'/'dismiss' -> klik button#button.button
-          2. Polling 8s tunggu button#button.button muncul
-          3. Fallback: span.touch
+        Popup 'I'll do this later' di Gemini Business menggunakan Web Component
+        dengan Shadow DOM bertingkat. Selenium find_elements() tidak bisa menembus
+        shadow root, sehingga teks tombol tidak terbaca.
+
+        Strategi (prioritas):
+          1. JS shadow DOM traversal (_JS_FIND_DISMISS_BTN)
+             -> Rekursif semua shadowRoot, cari button dengan teks 'later'/'skip'/'dismiss'
+             -> Klik langsung via JS
+          2. Polling 10 detik: JS traversal berulang (popup mungkin muncul terlambat)
+          3. Fallback: debug dump semua button di shadow DOM via _JS_LIST_BUTTONS
+             -> log untuk analisis, lalu coba klik button#button pertama yang visible
         """
-        time.sleep(random.uniform(1.5, 2.5))
+        # Tunggu halaman settle
+        time.sleep(random.uniform(2, 3))
 
+        # Strategy 1: Langsung coba JS shadow DOM traversal
         try:
-            src = driver.page_source.lower()
-            keywords = ["do this later", "i'll do this later", "skip", "dismiss", "not now"]
-            if any(k in src for k in keywords):
-                self._log("Popup text detected in page source, looking for button...")
-                for sel in ["button#button.button", "button#button", "button.button"]:
-                    try:
-                        els = driver.find_elements(By.CSS_SELECTOR, sel)
-                        for btn in els:
-                            cls  = (btn.get_attribute("class") or "").lower()
-                            aria = (btn.get_attribute("aria-label") or "").lower()
-                            if "icon-button" in cls or "download" in aria:
-                                continue
-                            if btn.is_displayed():
-                                self._js_click(driver, btn)
-                                self._log(f"Clicked dismiss popup: {sel}")
-                                return True
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+            btn = driver.execute_script(_JS_FIND_DISMISS_BTN)
+            if btn:
+                driver.execute_script("arguments[0].click();", btn)
+                self._log("[Shadow DOM] Clicked 'I'll do this later' via JS traversal")
+                return True
+        except Exception as e:
+            self._log(f"JS shadow DOM traversal error: {e}", "WARNING")
 
-        deadline = time.time() + 8
+        # Strategy 2: Polling 10 detik
+        self._log("Popup not found immediately, polling 10s...")
+        deadline = time.time() + 10
         while time.time() < deadline:
-            for sel in ["button#button.button", "button#button", "button.button"]:
-                try:
-                    els = driver.find_elements(By.CSS_SELECTOR, sel)
-                    for btn in els:
-                        cls  = (btn.get_attribute("class") or "").lower()
-                        aria = (btn.get_attribute("aria-label") or "").lower()
-                        if "icon-button" in cls or "download" in aria:
-                            continue
-                        if btn.is_displayed():
-                            self._js_click(driver, btn)
-                            self._log(f"Clicked dismiss popup: {sel}")
-                            return True
-                except Exception:
-                    pass
+            try:
+                btn = driver.execute_script(_JS_FIND_DISMISS_BTN)
+                if btn:
+                    driver.execute_script("arguments[0].click();", btn)
+                    self._log("[Shadow DOM] Clicked 'I'll do this later' (polling)")
+                    return True
+            except Exception:
+                pass
             time.sleep(0.5)
 
+        # Strategy 3: Debug dump semua button di shadow DOM
+        self._log("Still not found. Listing all shadow DOM buttons for debug...", "WARNING")
         try:
-            els = driver.find_elements(By.CSS_SELECTOR, "span.touch")
-            for el in els:
-                if el.is_displayed():
-                    self._js_click(driver, el)
-                    self._log("Clicked span.touch (fallback dismiss)")
-                    return True
-        except Exception:
-            pass
+            raw = driver.execute_script(_JS_LIST_BUTTONS)
+            buttons_info = json.loads(raw) if raw else []
+            for info in buttons_info:
+                if info.get("visible"):
+                    self._log(
+                        f"  [BTN] tag={info['tag']} id='{info['id']}' "
+                        f"cls='{info['cls'][:40]}' aria='{info['aria'][:40]}' "
+                        f"text='{info['text'][:60]}'",
+                        "WARNING"
+                    )
+        except Exception as e:
+            self._log(f"Button listing failed: {e}", "WARNING")
 
+        # Strategy 3b: Blind click - klik button#button visible pertama yang bukan download/icon
+        # (jika popup ada tapi teks tidak terdeteksi karena encoding/language berbeda)
+        try:
+            clicked = driver.execute_script("""
+                (function() {
+                    var SKIP_ARIA = ['download', 'close', 'menu', 'search', 'send'];
+                    function isSkip(el) {
+                        var aria = (el.getAttribute('aria-label') || '').toLowerCase();
+                        var cls  = (el.getAttribute('class') || '').toLowerCase();
+                        return SKIP_ARIA.some(function(k) { return aria.indexOf(k) !== -1; })
+                            || cls.indexOf('icon-button') !== -1
+                            || cls.indexOf('send') !== -1;
+                    }
+                    function scan(root, depth) {
+                        if (depth > 10) return null;
+                        var btns = root.querySelectorAll('button#button, button.button');
+                        for (var i = 0; i < btns.length; i++) {
+                            var b = btns[i];
+                            if (!isSkip(b) && b.offsetParent !== null) {
+                                b.click();
+                                return b.outerHTML.substring(0, 100);
+                            }
+                        }
+                        var all = root.querySelectorAll('*');
+                        for (var j = 0; j < all.length; j++) {
+                            if (all[j].shadowRoot) {
+                                var r = scan(all[j].shadowRoot, depth + 1);
+                                if (r) return r;
+                            }
+                        }
+                        return null;
+                    }
+                    return scan(document, 0);
+                })();
+            """)
+            if clicked:
+                self._log(
+                    f"[Shadow DOM] Blind-clicked first visible button#button: {clicked}",
+                    "WARNING"
+                )
+                return True
+        except Exception as e:
+            self._log(f"Blind click failed: {e}", "WARNING")
+
+        # Screenshot untuk debug
+        self._debug_dump(driver, "dismiss_popup_failed")
         return False
 
     # ── Process single prompt ───────────────────────────────────────────
