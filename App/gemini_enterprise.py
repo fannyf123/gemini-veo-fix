@@ -972,10 +972,12 @@ class GeminiEnterpriseProcessor(QThread):
             self._debug_dump(driver, "verify_btn_failed")
 
         # VALIDATE: Step 9 - check page moved past OTP verification
+        # NOTE: Do NOT use generic 'error' as failure indicator — it matches JS code in page source
         if not self._validate_step(driver, "Post-Verify",
                 success_indicators=["full name", "fullname", "agree", "get started",
                                     "signing you in", "welcome"],
-                failure_indicators=["error", "invalid code", "incorrect", "try again"],
+                failure_indicators=["invalid verification code", "wrong code",
+                                    "code is incorrect", "code has expired"],
                 timeout=30):
             self._log("Step 9 validation: still on OTP page after verify", "ERROR")
             self._debug_dump(driver, "verify_not_progressed")
@@ -1149,29 +1151,37 @@ class GeminiEnterpriseProcessor(QThread):
                 self._log("Pressed Enter to submit email")
 
             # FIX: Wait for Gemini to ACTUALLY redirect to OTP/verification page
-            # The old 'OR' condition passed immediately because readyState was already complete.
             old_url = driver.current_url
-            self._log(f"Waiting for Gemini redirect from: {old_url}")
+            self._log(f"Waiting for Gemini redirect to verification page...")
             try:
-                # Wait for URL to actually CHANGE (not just readyState)
-                WebDriverWait(driver, 45).until(
-                    lambda d: d.current_url != old_url
+                # Wait for URL to actually reach the target verification page
+                WebDriverWait(driver, 60).until(
+                    lambda d: "accountverification" in d.current_url.lower() or "verify-oob-code" in d.current_url.lower()
                 )
-                self._log(f"URL changed to: {driver.current_url}")
+                self._log(f"Target URL reached: {driver.current_url}")
             except TimeoutException:
-                self._log("URL did not change after 45s — may still be on same page", "WARNING")
+                self._log(f"URL did not reach verification page after 60s. Current: {driver.current_url}", "WARNING")
                 self._debug_dump(driver, "email_redirect_timeout")
 
-            # Now wait for the NEW page to fully load
+            # Wait for the NEW page to fully load
             self._wait_page_ready(driver, timeout=30, label="OTP/Verification Page")
 
-            # Verify we actually landed on the verification page
-            current_url = driver.current_url.lower()
-            if any(k in current_url for k in ["verify", "accountverification", "oob-code", "challenge"]):
-                self._log(f"Confirmed on verification page: {driver.current_url}")
-            else:
-                self._log(f"Unexpected page after email submit: {driver.current_url}", "WARNING")
-                self._debug_dump(driver, "unexpected_page_after_email")
+            # Wait for OTP page CONTENT to actually appear (not just URL)
+            otp_content_ready = False
+            for content_check in range(10):  # max ~20 seconds
+                try:
+                    src = driver.page_source.lower()
+                    if any(k in src for k in ["verification code", "enter verification",
+                                               "verify", "enter code", "sent a"]):
+                        otp_content_ready = True
+                        self._log("OTP page content confirmed loaded")
+                        break
+                except Exception:
+                    pass
+                time.sleep(2)
+            if not otp_content_ready:
+                self._log("OTP page content not detected, proceeding anyway...", "WARNING")
+                self._debug_dump(driver, "otp_content_not_found")
 
             if self._is_error_page(driver):
                 self._log(
@@ -1197,129 +1207,84 @@ class GeminiEnterpriseProcessor(QThread):
 
     def _submit_otp(self, driver, otp: str) -> bool:
         """
-        Enter OTP into Google's 6-box verification page.
-        The page has 6 separate <input> boxes, one per character.
-        Clicking the first box and typing auto-advances to the next.
+        Enter OTP into Google's verification page.
+
+        Google uses 6 separate input boxes that auto-advance focus.
+        The browser may only expose 1 visible input at a time.
+
+        Strategy: Click the first input, then type each character.
+        The form auto-advances to the next box after each char.
+        Do NOT clear() or Ctrl+A — that destroys already-typed chars.
         """
         self._log(f"Attempting to enter OTP: {otp} ({len(otp)} chars)")
 
-        # --- Step A: Wait for the OTP page to be ready ---
+        # Wait for the OTP form to be fully rendered
         self._wait_page_ready(driver, timeout=15, label="OTP Form")
+        time.sleep(1)  # extra settle time for form to be interactive
 
-        # --- Step B: Find OTP input boxes ---
-        # Google's 6-box OTP page: find all visible input elements in the form
-        otp_inputs = []
-        for attempt in range(3):
+        # Find the first visible input box on the page
+        first_input = None
+        for find_attempt in range(5):
             try:
-                # Look for all inputs on the page
                 all_inputs = driver.find_elements(By.CSS_SELECTOR, "input")
-                otp_inputs = []
                 for inp in all_inputs:
                     try:
                         if inp.is_displayed():
                             inp_type = (inp.get_attribute("type") or "").lower()
-                            # OTP boxes are typically text, tel, or number
                             if inp_type in ("text", "tel", "number", ""):
-                                otp_inputs.append(inp)
+                                first_input = inp
+                                break
                     except Exception:
                         pass
-                if otp_inputs:
-                    self._log(f"Found {len(otp_inputs)} OTP input box(es)")
+                if first_input:
+                    self._log(f"OTP first input found (type={first_input.get_attribute('type')})")
                     break
             except Exception as e:
-                self._log(f"OTP input search error (attempt {attempt+1}): {e}", "WARNING")
+                self._log(f"OTP input search attempt {find_attempt+1}/5: {e}", "WARNING")
             time.sleep(2)
 
-        if not otp_inputs:
-            self._log("No OTP input boxes found on page!", "ERROR")
-            self._debug_dump(driver, "otp_boxes_not_found")
+        if not first_input:
+            self._log("OTP input NOT FOUND on page!", "ERROR")
+            self._debug_dump(driver, "otp_input_not_found")
             return False
 
-        # --- Step C: Type OTP ---
+        # Type OTP: click the first box, then send each character one by one.
+        # Google's form auto-advances focus to the next box after each keystroke.
+        # Do NOT use clear(), Ctrl+A, or Delete — they destroy already-typed characters.
         for attempt in range(3):
             try:
-                if len(otp_inputs) >= len(otp):
-                    # MULTI-BOX MODE: 6 separate boxes, type one char per box
-                    self._log(f"Multi-box OTP mode: {len(otp_inputs)} boxes for {len(otp)} chars")
-                    for i, char in enumerate(otp):
-                        box = otp_inputs[i]
-                        try:
-                            box.click()
-                        except Exception:
-                            driver.execute_script("arguments[0].focus();", box)
-                        time.sleep(0.1)
-                        box.clear()
-                        box.send_keys(char)
-                        time.sleep(random.uniform(0.1, 0.25))
-                else:
-                    # SINGLE-BOX MODE: one input field for entire code
-                    self._log("Single-box OTP mode")
-                    box = otp_inputs[0]
-                    try:
-                        box.click()
-                    except Exception:
-                        driver.execute_script("arguments[0].focus();", box)
-                    time.sleep(0.2)
-                    box.clear()
-                    time.sleep(0.1)
-                    # Select all + delete for thorough clear
-                    ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).perform()
-                    ActionChains(driver).send_keys(Keys.DELETE).perform()
-                    time.sleep(0.2)
-                    for char in otp:
-                        box.send_keys(char)
-                        time.sleep(random.uniform(0.05, 0.15))
+                # Click the first input to focus it
+                try:
+                    first_input.click()
+                except Exception:
+                    driver.execute_script("arguments[0].focus();", first_input)
+                time.sleep(0.3)
 
-                time.sleep(0.5)
+                # Type each character with a small human-like delay
+                self._log(f"Typing OTP char-by-char (attempt {attempt+1}/3)...")
+                for i, char in enumerate(otp):
+                    ActionChains(driver).send_keys(char).perform()
+                    time.sleep(random.uniform(0.15, 0.30))
 
-                # --- Step D: Verify OTP was actually entered ---
-                if len(otp_inputs) >= len(otp):
-                    # Read each box value
-                    entered = ""
-                    for i in range(len(otp)):
-                        val = (otp_inputs[i].get_attribute("value") or "").strip()
-                        entered += val
-                    if entered.upper() == otp.upper():
-                        self._log(f"OTP VERIFIED across {len(otp)} boxes: '{entered}' ✓")
-                        return True
-                    self._log(
-                        f"OTP verify attempt {attempt+1}/3: expected '{otp}', got '{entered}'",
-                        "WARNING"
-                    )
-                else:
-                    actual = (otp_inputs[0].get_attribute("value") or "").strip()
-                    if actual.upper() == otp.upper():
-                        self._log(f"OTP VERIFIED in single box: '{actual}' ✓")
-                        return True
-                    self._log(
-                        f"OTP verify attempt {attempt+1}/3: expected '{otp}', got '{actual}'",
-                        "WARNING"
-                    )
-
-                # Before retry, re-find the elements (they may have gone stale)
                 time.sleep(1)
-                all_inputs = driver.find_elements(By.CSS_SELECTOR, "input")
-                otp_inputs = [
-                    inp for inp in all_inputs
-                    if inp.is_displayed() and
-                    (inp.get_attribute("type") or "").lower() in ("text", "tel", "number", "")
-                ]
+                self._log(f"OTP typed successfully: {otp}")
+                return True
+
             except Exception as e:
                 self._log(f"OTP typing error (attempt {attempt+1}/3): {e}", "WARNING")
-                time.sleep(1)
+                # If failed, try to refresh the inputs
+                time.sleep(2)
+                try:
+                    all_inputs = driver.find_elements(By.CSS_SELECTOR, "input")
+                    for inp in all_inputs:
+                        if inp.is_displayed() and (inp.get_attribute("type") or "").lower() in ("text", "tel", "number", ""):
+                            first_input = inp
+                            break
+                except Exception:
+                    pass
 
-        # --- Step E: Last resort - type via ActionChains on first box ---
-        self._log("Falling back to ActionChains on first input...", "WARNING")
-        try:
-            if otp_inputs:
-                otp_inputs[0].click()
-                time.sleep(0.2)
-            ActionChains(driver).send_keys(otp).perform()
-            time.sleep(0.5)
-            self._log(f"OTP sent via ActionChains: {otp}")
-            return True
-        except Exception as e:
-            self._log(f"ActionChains OTP failed: {e}", "ERROR")
+        self._log("OTP input failed after 3 attempts!", "ERROR")
+        self._debug_dump(driver, "otp_typing_failed")
         return False
 
     def _click_verify_button(self, driver) -> bool:
