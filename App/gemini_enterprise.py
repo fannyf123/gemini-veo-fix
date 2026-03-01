@@ -1070,7 +1070,8 @@ class GeminiEnterpriseProcessor(QThread):
         if not self._validate_step(driver, "Post-Agree",
                 success_indicators=["signing you in", "welcome", "do this later",
                                     "gemini", "search"],
-                failure_indicators=["error", "something went wrong"],
+                failure_indicators=["something went wrong", "couldn't sign you in",
+                                    "try again later"],
                 timeout=30):
             self._log("Step 11 validation: agree step did not progress", "ERROR")
             self._debug_dump(driver, "agree_not_progressed")
