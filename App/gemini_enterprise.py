@@ -506,6 +506,21 @@ class GeminiEnterpriseProcessor(QThread):
         except TimeoutException:
             return False
 
+    def _wait_page_ready(self, driver, timeout=30, extra_selector=None, label=""):
+        """Wait until document.readyState == 'complete' and optionally for an extra element."""
+        tag = f" [{label}]" if label else ""
+        try:
+            WebDriverWait(driver, timeout).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+        except TimeoutException:
+            self._log(f"Page readyState timeout{tag} ({timeout}s)", "WARNING")
+        if extra_selector:
+            el = self._wait_visible(driver, extra_selector, timeout=min(timeout, 15))
+            if not el:
+                self._log(f"Extra element '{extra_selector}' not found{tag}", "WARNING")
+        self._log(f"Page ready{tag}")
+
     def _fast_type(self, driver, element, text: str):
         """Fast input via JS — for email, OTP, name fields."""
         try:
@@ -565,8 +580,7 @@ class GeminiEnterpriseProcessor(QThread):
                 lambda d: d.current_url != "about:blank")
         except Exception:
             pass
-        time.sleep(random.uniform(1, 1.5))
-        self._log("Gemini Business page loaded.")
+        self._wait_page_ready(driver, timeout=30, extra_selector="#email-input", label="Gemini Home")
 
     # ── Main run ─────────────────────────────────────────────────────
     def run(self):
@@ -678,7 +692,7 @@ class GeminiEnterpriseProcessor(QThread):
                         time.sleep(delay)
                         try:
                             driver.get(GEMINI_HOME_URL)
-                            time.sleep(random.uniform(3, 5))
+                            self._wait_page_ready(driver, timeout=20, label="Worker Retry Nav")
                             self._initial_setup(driver)
                         except Exception:
                             pass
@@ -718,7 +732,7 @@ class GeminiEnterpriseProcessor(QThread):
         for tab_try in range(1, MAX_TAB_RETRY + 1):
             try:
                 driver.execute_script("window.open('about:blank', '_blank');")
-                time.sleep(1)
+                time.sleep(0.5)
                 if len(driver.window_handles) > 1:
                     driver.switch_to.window(driver.window_handles[-1])
                     gemini_tab = driver.current_window_handle
@@ -739,7 +753,7 @@ class GeminiEnterpriseProcessor(QThread):
 
         # Step 5: Verify OTP page actually loaded
         self._log("Step 5: Waiting for OTP page to load...")
-        time.sleep(random.uniform(1.5, 2.5))
+        self._wait_page_ready(driver, timeout=20, label="OTP Page")
         otp_page_ok = False
         for otp_check in range(3):
             try:
@@ -812,7 +826,7 @@ class GeminiEnterpriseProcessor(QThread):
         except Exception as e:
             self._log(f"Failed to switch to Gemini tab: {e}", "ERROR")
             return False
-        time.sleep(random.uniform(0.5, 1))
+        self._wait_page_ready(driver, timeout=15, label="Gemini Tab (OTP)")
 
         otp_submitted = False
         for otp_sub_try in range(1, 4):
@@ -850,7 +864,7 @@ class GeminiEnterpriseProcessor(QThread):
             self._log("Verify button click failed after retries", "WARNING")
             self._debug_dump(driver, "verify_btn_failed")
 
-        time.sleep(random.uniform(1, 2))
+        self._wait_page_ready(driver, timeout=30, label="Post-Verify")
 
         # Step 10: Enter name with retry
         self._log("Step 10: Completing signup - entering name")
@@ -913,7 +927,7 @@ class GeminiEnterpriseProcessor(QThread):
             except Exception:
                 pass
         self._log("Signing in completed.")
-        time.sleep(random.uniform(1, 1.5))
+        self._wait_page_ready(driver, timeout=20, label="Post-SignIn")
 
         # Step 13: Initial setup with retry
         self._log("Step 13: Initial setup")
@@ -982,7 +996,7 @@ class GeminiEnterpriseProcessor(QThread):
                 email_el.send_keys(Keys.RETURN)
                 self._log("Pressed Enter to submit email")
 
-            time.sleep(random.uniform(1.5, 2.5))
+            self._wait_page_ready(driver, timeout=20, label="Post Email Submit")
 
             if self._is_error_page(driver):
                 self._log(
@@ -1183,7 +1197,7 @@ class GeminiEnterpriseProcessor(QThread):
 
         if not dismissed:
             self._log("No 'do this later' popup found, proceeding...", "WARNING")
-        time.sleep(random.uniform(1, 2))
+        self._wait_page_ready(driver, timeout=15, label="Post-Dismiss Popup")
 
         # Step 17: Click tools button with retry
         self._log("Step 17: Clicking tools button (page_info icon)...")
@@ -1202,7 +1216,7 @@ class GeminiEnterpriseProcessor(QThread):
                 time.sleep(2)
                 try:
                     driver.refresh()
-                    time.sleep(random.uniform(3, 5))
+                    self._wait_page_ready(driver, timeout=20, label="Tools Refresh")
                 except Exception:
                     pass
 
@@ -1211,7 +1225,7 @@ class GeminiEnterpriseProcessor(QThread):
             self._debug_dump(driver, "tools_btn_not_found")
             return
 
-        time.sleep(random.uniform(1, 1.5))
+        self._wait_page_ready(driver, timeout=15, label="Post-Tools Click")
 
         # Step 18: Click 'Create videos with Veo' with retry
         self._log("Step 18: Selecting 'Create videos with Veo'...")
@@ -1263,7 +1277,7 @@ class GeminiEnterpriseProcessor(QThread):
             self._log("Veo option not found after retries", "WARNING")
             self._debug_dump(driver, "veo_not_found")
 
-        time.sleep(random.uniform(1, 2))
+        self._wait_page_ready(driver, timeout=15, label="Post-Veo Selection")
         self._log("Initial setup completed!")
 
     # ── Process single prompt ───────────────────────────────────────────────
@@ -1277,6 +1291,7 @@ class GeminiEnterpriseProcessor(QThread):
                 self._log(f"Failed to switch to Gemini tab: {e}", "ERROR")
                 return "error"
 
+        self._wait_page_ready(driver, timeout=15, label="Pre-Prompt Input")
         self._progress(int((prompt_num / total) * 100), f"Prompt {prompt_num}/{total}")
 
         # Step 19: Input prompt with retry for stale elements
@@ -1379,7 +1394,7 @@ class GeminiEnterpriseProcessor(QThread):
             except Exception:
                 pass
         self._log("Generation started")
-        time.sleep(random.uniform(1, 1.5))
+        self._wait_page_ready(driver, timeout=15, label="Post-Prompt Submit")
 
         return self._wait_for_generation(driver, prompt_num)
 
