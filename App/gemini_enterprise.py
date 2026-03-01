@@ -593,6 +593,34 @@ class GeminiEnterpriseProcessor(QThread):
         self._log(f"Failed to verify {field_name} input after 3 attempts!", "ERROR")
         return False
 
+    def _validate_step(self, driver, step_name: str, success_indicators: list,
+                       failure_indicators: list = None, timeout: int = 10) -> bool:
+        """Validate a step by checking page source/URL for success or failure indicators."""
+        self._wait_page_ready(driver, timeout=timeout, label=f"Validate: {step_name}")
+        for check in range(3):
+            try:
+                src = driver.page_source.lower()
+                url = driver.current_url.lower()
+                combined = src + " " + url
+                # Check for failure first
+                if failure_indicators:
+                    if any(k in combined for k in failure_indicators):
+                        self._log(f"STEP VALIDATION FAILED [{step_name}]: failure indicator found", "WARNING")
+                        self._debug_dump(driver, f"validate_fail_{step_name}")
+                        return False
+                # Check for success
+                if any(k in combined for k in success_indicators):
+                    self._log(f"STEP VALIDATED [{step_name}]: OK ✓")
+                    return True
+                if check < 2:
+                    time.sleep(2)
+            except Exception as e:
+                self._log(f"Validation error [{step_name}]: {e}", "WARNING")
+                time.sleep(2)
+        self._log(f"STEP VALIDATION [{step_name}]: indicators not found, proceeding cautiously", "WARNING")
+        self._debug_dump(driver, f"validate_uncertain_{step_name}")
+        return True  # proceed cautiously
+
     def _fast_type(self, driver, element, text: str):
         """Fast input via JS — for email, OTP, name fields."""
         try:
@@ -690,6 +718,10 @@ class GeminiEnterpriseProcessor(QThread):
             for w_idx, chunk in enumerate(chunks, 1):
                 futures.append(executor.submit(self._worker_run, w_idx, chunk, curr_global_idx, total))
                 curr_global_idx += len(chunk)
+                # FIX: 10-second delay between each worker start
+                if w_idx < len(chunks):
+                    self._log(f"Waiting 10s before starting Worker {w_idx + 1}...")
+                    time.sleep(10)
 
             # Wait for all workers to finish
             for f in futures:
@@ -939,7 +971,15 @@ class GeminiEnterpriseProcessor(QThread):
             self._log("Verify button click failed after retries", "WARNING")
             self._debug_dump(driver, "verify_btn_failed")
 
-        self._wait_page_ready(driver, timeout=30, label="Post-Verify")
+        # VALIDATE: Step 9 - check page moved past OTP verification
+        if not self._validate_step(driver, "Post-Verify",
+                success_indicators=["full name", "fullname", "agree", "get started",
+                                    "signing you in", "welcome"],
+                failure_indicators=["error", "invalid code", "incorrect", "try again"],
+                timeout=30):
+            self._log("Step 9 validation: still on OTP page after verify", "ERROR")
+            self._debug_dump(driver, "verify_not_progressed")
+            return False
 
         # Step 10: Enter name with retry
         self._log("Step 10: Completing signup - entering name")
@@ -962,6 +1002,11 @@ class GeminiEnterpriseProcessor(QThread):
         if not name_entered:
             self._log("Name form not found after retries, proceeding...", "WARNING")
 
+        # VALIDATE: Step 10 - check name was accepted
+        self._validate_step(driver, "Post-Name",
+            success_indicators=["agree", "get started", "signing you in", "welcome"],
+            timeout=10)
+
         # Step 11: Click agree with retry
         self._log("Step 11: Clicking 'Agree & get started'")
         agree_clicked = False
@@ -981,6 +1026,16 @@ class GeminiEnterpriseProcessor(QThread):
             time.sleep(2)
         if not agree_clicked:
             self._log("Agree button not clicked after retries", "WARNING")
+
+        # VALIDATE: Step 11 - check page moved to signing in
+        if not self._validate_step(driver, "Post-Agree",
+                success_indicators=["signing you in", "welcome", "do this later",
+                                    "gemini", "search"],
+                failure_indicators=["error", "something went wrong"],
+                timeout=30):
+            self._log("Step 11 validation: agree step did not progress", "ERROR")
+            self._debug_dump(driver, "agree_not_progressed")
+            return False
 
         # Step 12: Wait for signing in with error detection
         self._log("Step 12: Waiting for 'Signing you in...' to disappear")
@@ -1023,6 +1078,12 @@ class GeminiEnterpriseProcessor(QThread):
                     pass
         if not setup_ok:
             self._log("Initial setup failed after retries", "WARNING")
+            return False
+
+        # VALIDATE: Step 13 - check Gemini is ready for prompt input
+        self._validate_step(driver, "Post-InitialSetup",
+            success_indicators=["veo", "create", "prompt", "search", "prosemirror"],
+            timeout=15)
         self._log("Account registration and setup completed successfully!")
         return True
 
