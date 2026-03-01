@@ -1192,8 +1192,11 @@ class GeminiEnterpriseProcessor(QThread):
             self._log(f"Waiting for Gemini redirect to verification page...")
             try:
                 # Wait for URL to actually reach the target verification page
+                # Including oauth2/authorize as seen in logs
                 WebDriverWait(driver, 60).until(
-                    lambda d: "accountverification" in d.current_url.lower() or "verify-oob-code" in d.current_url.lower()
+                    lambda d: any(k in d.current_url.lower() for k in [
+                        "accountverification", "verify-oob-code", "oauth2/authorize", "signin-callback"
+                    ])
                 )
                 self._log(f"Target URL reached: {driver.current_url}")
             except TimeoutException:
