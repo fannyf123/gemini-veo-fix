@@ -1148,7 +1148,19 @@ class GeminiEnterpriseProcessor(QThread):
                 email_el.send_keys(Keys.RETURN)
                 self._log("Pressed Enter to submit email")
 
-            self._wait_page_ready(driver, timeout=20, label="Post Email Submit")
+            # FIX 2: Wait for Gemini to finish its redirect/loading
+            # (do NOT switch to mailticking until this page is done)
+            old_url = driver.current_url
+            self._log("Waiting for Gemini redirect after email submit...")
+            try:
+                WebDriverWait(driver, 30).until(
+                    lambda d: d.current_url != old_url or
+                              d.execute_script("return document.readyState") == "complete"
+                )
+            except TimeoutException:
+                self._log("Redirect timeout after email submit", "WARNING")
+            # Extra wait for page to fully settle
+            self._wait_page_ready(driver, timeout=20, label="Post Email Submit (redirect done)")
 
             if self._is_error_page(driver):
                 self._log(
@@ -1166,59 +1178,123 @@ class GeminiEnterpriseProcessor(QThread):
             else:
                 self._log(
                     f"Email submitted successfully on attempt {attempt}, "
-                    "OTP page should be loading..."
+                    f"page URL now: {driver.current_url}"
                 )
                 return True
 
         return False
 
     def _submit_otp(self, driver, otp: str) -> bool:
-        # Step 11: Input OTP — find the input element then use _verified_type
+        """Enter OTP into the input field using send_keys (not .value) and verify it."""
+        self._log(f"Attempting to enter OTP: {otp}")
+
+        # --- Step A: Find the OTP input element ---
         otp_input = None
+        OTP_SELECTORS = [
+            "#yDmH0d > c-wiz > div > div > div.keerLb > div > div > div > form > div:nth-child(1) > div > div.AFffCd > div > input",
+            "input.J6L5wc",
+            "input[jsname='ovqh0b']",
+            "input[name='pinInput']",
+            "input[type='tel']",
+            "input[autocomplete='one-time-code']",
+        ]
 
-        # Priority: exact JS path
-        try:
-            otp_input = driver.execute_script(
-                'return document.querySelector("#yDmH0d > c-wiz > div > div > div.keerLb > div > div > div > form > div:nth-child(1) > div > div.AFffCd > div > input");'
-            )
-            if otp_input and otp_input.is_displayed():
-                self._log("OTP input found via verified selector")
-            else:
-                otp_input = None
-        except Exception as e:
-            self._log(f"OTP input selector error: {e}", "WARNING")
+        for sel in OTP_SELECTORS:
+            try:
+                el = WebDriverWait(driver, 5).until(
+                    EC.visibility_of_element_located((By.CSS_SELECTOR, sel))
+                )
+                if el:
+                    otp_input = el
+                    self._log(f"OTP input found: {sel}")
+                    break
+            except (TimeoutException, Exception):
+                pass
 
-        # Fallback selectors
+        # Fallback: any visible text input on the page
         if not otp_input:
-            for sel in [
-                "input.J6L5wc",
-                "input[jsname='ovqh0b']",
-                "input[name='pinInput']",
-                "input[type='text']",
-            ]:
+            try:
+                inputs = driver.find_elements(By.CSS_SELECTOR, "input")
+                for inp in inputs:
+                    try:
+                        inp_type = (inp.get_attribute("type") or "").lower()
+                        if inp_type in ("text", "tel", "number", "") and inp.is_displayed():
+                            otp_input = inp
+                            self._log(f"OTP input found (generic fallback): type={inp_type}")
+                            break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if not otp_input:
+            self._log("OTP input element NOT FOUND on page!", "ERROR")
+            self._debug_dump(driver, "otp_input_not_found")
+            return False
+
+        # --- Step B: Click, clear, and type OTP character by character ---
+        for attempt in range(3):
+            try:
+                # Click to focus
                 try:
-                    el = driver.find_element(By.CSS_SELECTOR, sel)
-                    if el.is_displayed():
-                        otp_input = el
-                        self._log(f"OTP input found via fallback: {sel}")
-                        break
+                    otp_input.click()
                 except Exception:
-                    pass
+                    driver.execute_script("arguments[0].focus();", otp_input)
+                time.sleep(0.3)
 
-        if otp_input:
-            # FIX 4: Use _verified_type to guarantee OTP is entered correctly
-            if self._verified_type(driver, otp_input, otp, field_name="OTP"):
-                return True
-            # If _verified_type failed, try raw send_keys as last resort
-            self._log("Falling back to ActionChains for OTP...", "WARNING")
+                # Clear existing content
+                otp_input.clear()
+                time.sleep(0.2)
+                # Double-clear: select all + delete
+                ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).perform()
+                time.sleep(0.1)
+                ActionChains(driver).send_keys(Keys.DELETE).perform()
+                time.sleep(0.2)
 
-        # Last resort: just type it into the active element
+                # Type OTP character by character (send_keys, NOT .value)
+                for char in otp:
+                    otp_input.send_keys(char)
+                    time.sleep(random.uniform(0.05, 0.15))
+                time.sleep(0.5)
+
+                # --- Step C: Verify OTP was actually typed ---
+                actual = (otp_input.get_attribute("value") or "").strip()
+                if actual == otp:
+                    self._log(f"OTP VERIFIED in input field: '{actual}' ✓")
+                    return True
+
+                # Some inputs don't expose .value, check via JS
+                actual_js = driver.execute_script(
+                    "return arguments[0].value;", otp_input
+                ) or ""
+                if actual_js.strip() == otp:
+                    self._log(f"OTP VERIFIED (JS): '{actual_js}' ✓")
+                    return True
+
+                self._log(
+                    f"OTP verify attempt {attempt+1}/3: expected '{otp}', "
+                    f"got value='{actual}', JS='{actual_js}'",
+                    "WARNING"
+                )
+                # Try once more with fresh element reference
+                time.sleep(1)
+            except Exception as e:
+                self._log(f"OTP typing error (attempt {attempt+1}/3): {e}", "WARNING")
+                time.sleep(1)
+
+        # --- Step D: Last resort - ActionChains to active element ---
+        self._log("All OTP input attempts failed, trying ActionChains to active element...", "WARNING")
         try:
+            otp_input.click()
+            time.sleep(0.2)
+            otp_input.clear()
+            time.sleep(0.2)
             ActionChains(driver).send_keys(otp).perform()
-            self._log(f"OTP typed via ActionChains: {otp}")
+            time.sleep(0.5)
+            self._log(f"OTP sent via ActionChains: {otp}")
             return True
-        except Exception:
-            pass
+        except Exception as e:
+            self._log(f"ActionChains OTP failed: {e}", "ERROR")
         return False
 
     def _click_verify_button(self, driver) -> bool:
