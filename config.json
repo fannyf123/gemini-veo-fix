@@ -1,0 +1,9 @@
+{
+  "output_dir": "D:/upscale/Video",
+  "headless": false,
+  "delay": 5,
+  "retry": 3,
+  "max_workers": 5,
+  "stealth": true,
+  "theme": "dark"
+}

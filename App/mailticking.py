@@ -177,6 +177,18 @@ class MailtickingClient:
     def _js_click(self, driver, element):
         driver.execute_script("arguments[0].click();", element)
 
+    def _wait_page_ready(self, driver, timeout=30, label=""):
+        """Wait until document.readyState == 'complete'."""
+        tag = f" [{label}]" if label else ""
+        try:
+            WebDriverWait(driver, timeout).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+        except TimeoutException:
+            self._log(f"Page readyState timeout{tag} ({timeout}s)", "WARNING")
+        time.sleep(0.5)
+        self._log(f"Page ready{tag}")
+
     def _safe_click(self, driver, element):
         for attempt in range(3):
             try:
@@ -220,12 +232,8 @@ class MailtickingClient:
         time.sleep(0.5)
         driver.switch_to.window(driver.window_handles[-1])
         driver.get(MAILTICKING_URL)
-        try:
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body")))
-        except Exception:
-            pass
-        time.sleep(random.uniform(3, 4))
+        # FIX 3: Wait for full page load, not just body tag
+        self._wait_page_ready(driver, timeout=30, label="mailticking.com")
         self._log("mailticking.com loaded.")
         return driver.current_window_handle
 
@@ -255,9 +263,9 @@ class MailtickingClient:
         # Step 4b: Klik Activate
         self._click_activate(driver)
 
-        # Tunggu halaman reload
+        # FIX 3: Wait for page to fully reload after Activate
         self._log("Waiting for page to reload after Activate...")
-        time.sleep(random.uniform(1.5, 2))
+        self._wait_page_ready(driver, timeout=30, label="Post-Activate")
 
         # Baca email aktif dari navbar
         final_email = self._read_email_from_navbar(driver) or email
@@ -532,12 +540,8 @@ class MailtickingClient:
         while time.time() - start < timeout:
             try:
                 driver.refresh()
-                try:
-                    WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.TAG_NAME, "body")))
-                except Exception:
-                    pass
-                time.sleep(random.uniform(0.8, 1.2))
+                # FIX 3: Wait for full page load after refresh
+                self._wait_page_ready(driver, timeout=15, label="Inbox Refresh")
 
                 try:
                     act_btns = driver.find_elements(

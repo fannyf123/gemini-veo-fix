@@ -507,7 +507,7 @@ class GeminiEnterpriseProcessor(QThread):
             return False
 
     def _wait_page_ready(self, driver, timeout=30, extra_selector=None, label=""):
-        """Wait until document.readyState == 'complete' and optionally for an extra element."""
+        """Wait until document.readyState == 'complete', network idle, and optionally for an extra element."""
         tag = f" [{label}]" if label else ""
         try:
             WebDriverWait(driver, timeout).until(
@@ -515,11 +515,83 @@ class GeminiEnterpriseProcessor(QThread):
             )
         except TimeoutException:
             self._log(f"Page readyState timeout{tag} ({timeout}s)", "WARNING")
+        # Wait for network to settle (no pending XHR/fetch)
+        try:
+            for _ in range(min(timeout, 15)):
+                pending = driver.execute_script(
+                    "try { return (window.performance.getEntriesByType('resource')"
+                    ".filter(r => !r.responseEnd).length) } catch(e) { return 0; }"
+                )
+                if pending == 0:
+                    break
+                time.sleep(1)
+        except Exception:
+            pass
+        # Wait a tiny bit more for lazy-loaded JS to render
+        time.sleep(0.5)
         if extra_selector:
-            el = self._wait_visible(driver, extra_selector, timeout=min(timeout, 15))
+            el = self._wait_visible(driver, extra_selector, timeout=min(timeout, 20))
             if not el:
                 self._log(f"Extra element '{extra_selector}' not found{tag}", "WARNING")
         self._log(f"Page ready{tag}")
+
+    def _close_extra_tabs(self, driver):
+        """Close all tabs except the first one and switch to it."""
+        try:
+            handles = driver.window_handles
+            if len(handles) > 1:
+                main = handles[0]
+                for h in handles[1:]:
+                    try:
+                        driver.switch_to.window(h)
+                        driver.close()
+                    except Exception:
+                        pass
+                driver.switch_to.window(main)
+                self._log(f"Closed {len(handles) - 1} extra tab(s)")
+        except Exception as e:
+            self._log(f"Error closing tabs: {e}", "WARNING")
+
+    def _verified_type(self, driver, element, text: str, field_name="field") -> bool:
+        """Type text into an element and VERIFY it was actually entered."""
+        for attempt in range(3):
+            try:
+                # Clear first
+                element.click()
+                time.sleep(0.1)
+                driver.execute_script(
+                    "arguments[0].value = '';"
+                    "arguments[0].value = arguments[1];"
+                    "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
+                    "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
+                    element, text
+                )
+                time.sleep(0.3)
+                # Verify
+                actual = driver.execute_script(
+                    "return arguments[0].value;", element
+                ) or ""
+                if actual.strip() == text.strip():
+                    self._log(f"{field_name} verified OK: '{text}'")
+                    return True
+                # Fallback: use send_keys
+                self._log(f"{field_name} mismatch (got '{actual}'), retrying with send_keys...", "WARNING")
+                element.clear()
+                time.sleep(0.1)
+                element.send_keys(text)
+                time.sleep(0.3)
+                actual2 = driver.execute_script(
+                    "return arguments[0].value;", element
+                ) or ""
+                if actual2.strip() == text.strip():
+                    self._log(f"{field_name} verified OK (send_keys): '{text}'")
+                    return True
+                self._log(f"{field_name} still mismatch: expected '{text}', got '{actual2}'", "WARNING")
+            except Exception as e:
+                self._log(f"{field_name} input error (attempt {attempt+1}): {e}", "WARNING")
+            time.sleep(0.5)
+        self._log(f"Failed to verify {field_name} input after 3 attempts!", "ERROR")
+        return False
 
     def _fast_type(self, driver, element, text: str):
         """Fast input via JS — for email, OTP, name fields."""
@@ -712,6 +784,9 @@ class GeminiEnterpriseProcessor(QThread):
     def _register_account(self, driver, worker_id=0) -> bool:
         for retry in range(1, MAX_ACCOUNT_RETRY + 1):
             self._log(f"[W-{worker_id}] --- ACCOUNT REGISTRATION (Attempt {retry}/{MAX_ACCOUNT_RETRY}) ---")
+            # FIX 1: Close all extra tabs before each retry
+            if retry > 1:
+                self._close_extra_tabs(driver)
             ok = self._register_once(driver, worker_id)
             if ok:
                 return True
@@ -974,8 +1049,24 @@ class GeminiEnterpriseProcessor(QThread):
                 time.sleep(2)
                 continue
 
-            self._fast_type(driver, email_el, email)
-            self._log(f"Email entered: {email}")
+            # FIX 4: Use _verified_type to guarantee the text is entered correctly
+            if not self._verified_type(driver, email_el, email, field_name="Email"):
+                self._log("Email input verification failed!", "ERROR")
+                self._debug_dump(driver, f"email_verify_fail_{attempt}")
+                continue
+
+            # FIX 2: Cross-check - read back what is actually in the input field
+            actual_email = driver.execute_script(
+                "return arguments[0].value;", email_el
+            ) or ""
+            if actual_email.strip().lower() != email.strip().lower():
+                self._log(
+                    f"EMAIL MISMATCH! Expected: '{email}', Got: '{actual_email}'",
+                    "ERROR"
+                )
+                self._debug_dump(driver, f"email_mismatch_{attempt}")
+                continue
+            self._log(f"Email cross-check OK: '{actual_email}'")
             time.sleep(random.uniform(0.3, 0.6))
 
             # Step 7: Klik submit button menggunakan JS path yang sudah diverifikasi
@@ -1021,50 +1112,49 @@ class GeminiEnterpriseProcessor(QThread):
         return False
 
     def _submit_otp(self, driver, otp: str) -> bool:
-        # Step 11: Input OTP menggunakan JS path yang sudah diverifikasi
+        # Step 11: Input OTP — find the input element then use _verified_type
+        otp_input = None
+
+        # Priority: exact JS path
         try:
             otp_input = driver.execute_script(
                 'return document.querySelector("#yDmH0d > c-wiz > div > div > div.keerLb > div > div > div > form > div:nth-child(1) > div > div.AFffCd > div > input");'
             )
-            if otp_input:
-                driver.execute_script(
-                    "arguments[0].value = arguments[1];"
-                    "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
-                    "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
-                    otp_input, otp
-                )
-                self._log(f"OTP entered via verified selector: {otp}")
-                time.sleep(0.3)
+            if otp_input and otp_input.is_displayed():
+                self._log("OTP input found via verified selector")
+            else:
+                otp_input = None
+        except Exception as e:
+            self._log(f"OTP input selector error: {e}", "WARNING")
+
+        # Fallback selectors
+        if not otp_input:
+            for sel in [
+                "input.J6L5wc",
+                "input[jsname='ovqh0b']",
+                "input[name='pinInput']",
+                "input[type='text']",
+            ]:
                 try:
-                    otp_input.send_keys(otp)
+                    el = driver.find_element(By.CSS_SELECTOR, sel)
+                    if el.is_displayed():
+                        otp_input = el
+                        self._log(f"OTP input found via fallback: {sel}")
+                        break
                 except Exception:
                     pass
-                return True
-        except Exception as e:
-            self._log(f"OTP input error: {e}", "WARNING")
 
-        # Fallback methods
-        for sel in [
-            "input.J6L5wc",
-            "input[jsname='ovqh0b']",
-            "input[name='pinInput']",
-        ]:
-            try:
-                el = driver.find_element(By.CSS_SELECTOR, sel)
-                driver.execute_script(
-                    "arguments[0].value = arguments[1];"
-                    "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
-                    "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
-                    el, otp
-                )
-                self._log(f"OTP entered via fallback {sel}: {otp}")
-                time.sleep(0.3)
+        if otp_input:
+            # FIX 4: Use _verified_type to guarantee OTP is entered correctly
+            if self._verified_type(driver, otp_input, otp, field_name="OTP"):
                 return True
-            except Exception:
-                pass
+            # If _verified_type failed, try raw send_keys as last resort
+            self._log("Falling back to ActionChains for OTP...", "WARNING")
 
+        # Last resort: just type it into the active element
         try:
             ActionChains(driver).send_keys(otp).perform()
+            self._log(f"OTP typed via ActionChains: {otp}")
             return True
         except Exception:
             pass
@@ -1135,8 +1225,11 @@ class GeminiEnterpriseProcessor(QThread):
 
         if name_el:
             name = _random_name()
+            if self._verified_type(driver, name_el, name, field_name="Name"):
+                return True
+            # Fallback to _fast_type if _verified_type fails
             self._fast_type(driver, name_el, name)
-            self._log(f"Name entered: {name}")
+            self._log(f"Name entered (fallback): {name}")
             time.sleep(0.3)
             return True
         return False
