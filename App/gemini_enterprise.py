@@ -499,6 +499,16 @@ class GeminiEnterpriseProcessor(QThread):
             return None
 
     def _wait_gone(self, driver, css_selector, timeout=60):
+        # 3. Validasi: sebelum menunggu text/elemen hilang, pastikan text/elemen tsb ada
+        try:
+            el = driver.find_element(By.CSS_SELECTOR, css_selector)
+            if el.is_displayed():
+                self._log(f"Validation OK: Element '{css_selector}' exists. Waiting for it to disappear...")
+            else:
+                self._log(f"Element '{css_selector}' exists in DOM but already hidden.", "WARNING")
+        except Exception:
+            self._log(f"Element '{css_selector}' not found initially before wait_gone.", "WARNING")
+
         try:
             WebDriverWait(driver, timeout).until(
                 EC.invisibility_of_element_located((By.CSS_SELECTOR, css_selector)))
@@ -554,6 +564,15 @@ class GeminiEnterpriseProcessor(QThread):
 
     def _verified_type(self, driver, element, text: str, field_name="field") -> bool:
         """Type text into an element and VERIFY it was actually entered."""
+        # 2. Validasi: pastikan kolom text input tersedia
+        try:
+            if not element.is_displayed() or not element.is_enabled():
+                self._log(f"Validation FAILED: Input field '{field_name}' is not interactable/available!", "ERROR")
+                return False
+            self._log(f"Validation OK: Input field '{field_name}' is available for typing.")
+        except Exception as e:
+            self._log(f"Error validating input field '{field_name}': {e}", "WARNING")
+
         for attempt in range(3):
             try:
                 # Clear first
@@ -639,6 +658,15 @@ class GeminiEnterpriseProcessor(QThread):
             self._human_type(driver, element, text)
 
     def _human_type(self, driver, element, text: str):
+        # 2. Validasi: pastikan kolom text input tersedia
+        try:
+            if not element.is_displayed() or not element.is_enabled():
+                self._log("Validation FAILED: Input field is not interactable/available for typing!", "WARNING")
+            else:
+                self._log("Validation OK: Input field is available for typing.")
+        except Exception:
+            pass
+
         element.click()
         time.sleep(random.uniform(0.1, 0.2))
         element.clear()
@@ -651,6 +679,15 @@ class GeminiEnterpriseProcessor(QThread):
         time.sleep(random.uniform(0.1, 0.3))
 
     def _human_click(self, driver, element):
+        # 1. Validasi: pastikan button tersedia sebelum klik
+        try:
+            if element.is_displayed() and element.is_enabled():
+                self._log("Validation OK: Button is available & clickable.")
+            else:
+                self._log("Validation FAILED: Button is not interactable/visible!", "WARNING")
+        except Exception:
+            pass
+
         try:
             ActionChains(driver).move_to_element(element).pause(
                 random.uniform(0.05, 0.15)).click().perform()
