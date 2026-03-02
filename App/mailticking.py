@@ -242,7 +242,7 @@ class MailtickingClient:
         """
         Urutan yang benar:
           1. Centang HANYA #type4 (abc@domain.com)
-          2. Klik #modalChange berulang sampai email bukan @gmail/@googlemail
+          2. Klik #modalChange 1 kali
           3. Klik Activate (#emailActivationModal > ... > a)
           4. Tunggu halaman reload -> baca email
         """
@@ -252,18 +252,18 @@ class MailtickingClient:
         else:
             self._log("Modal not detected, proceeding anyway...", "WARNING")
 
-        # Step 3: Centang HANYA #type4 dulu sebelum Change
+        # Step 3: Centang HANYA #type4 dulu
         self._configure_checkboxes(driver)
         time.sleep(0.5)
 
-        # Step 4a: Loop klik Change sampai email bukan @gmail / @googlemail
-        email = self._click_change_until_non_gmail(driver)
-        self._log(f"Non-gmail email ready: {email}")
+        # Klik Change 1 kali
+        email = self._click_change_once(driver)
+        self._log(f"Email ready after change: {email}")
 
         # Step 4b: Klik Activate
         self._click_activate(driver)
 
-        # FIX 3: Wait for page to fully reload after Activate
+        # Wait for page to fully reload
         self._log("Waiting for page to reload after Activate...")
         self._wait_page_ready(driver, timeout=30, label="Post-Activate")
 
@@ -303,14 +303,9 @@ class MailtickingClient:
             pass
         return ""
 
-    def _click_change_until_non_gmail(
-        self, driver, max_attempts: int = 20
-    ) -> str:
+    def _click_change_once(self, driver) -> str:
         """
-        Klik #modalChange berulang sampai email BUKAN @gmail.com / @googlemail.com.
-
-        Priority 0: document.querySelector("#modalChange")  <- exact JS path
-        Fallback  : button.btn-info text 'Change'
+        Klik #modalChange tepat 1 kali.
         """
         CHANGE_SELECTORS = [
             _SEL_CHANGE_BTN,              # Priority 0: exact -> "#modalChange"
@@ -334,35 +329,25 @@ class MailtickingClient:
                 pass
             return None
 
-        for attempt in range(1, max_attempts + 1):
-            current_email = self._read_email_from_modal(driver)
+        current_email = self._read_email_from_modal(driver)
+        self._log(f"Current email before change: {current_email}")
 
-            if current_email and not _is_banned_email(current_email):
-                self._log(
-                    f"Email valid (non-gmail) on attempt {attempt}: {current_email}")
-                return current_email
+        btn = _find_change_btn()
+        if not btn:
+            self._log("Change button tidak ditemukan", "WARNING")
+            return current_email
 
-            reason = "(kosong)" if not current_email else (
-                f"'{current_email}' adalah @gmail/@googlemail")
-            self._log(f"Attempt {attempt}/{max_attempts}: {reason}, klik Change...")
+        self._js_click(driver, btn)
+        self._log("Clicked Change button once.")
 
-            btn = _find_change_btn()
-            if not btn:
-                self._log("Change button tidak ditemukan", "WARNING")
-                break
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            time.sleep(0.4)
+            new_email = self._read_email_from_modal(driver)
+            if new_email and new_email != current_email:
+                return new_email
 
-            self._js_click(driver, btn)
-
-            deadline = time.time() + 3
-            while time.time() < deadline:
-                time.sleep(0.4)
-                new_email = self._read_email_from_modal(driver)
-                if new_email and new_email != current_email:
-                    break
-
-        last_email = self._read_email_from_modal(driver)
-        self._log(f"Max attempts reached. Last email: {last_email}", "WARNING")
-        return last_email
+        return self._read_email_from_modal(driver)
 
     # -------------------------------------------------------------------------
     def _configure_checkboxes(self, driver):

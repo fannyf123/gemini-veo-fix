@@ -205,6 +205,121 @@ _JS_LIST_BUTTONS = """
 })();
 """
 
+# JavaScript: extract all text across shadow DOMs
+_JS_GET_ALL_TEXT_DEEP = """
+(function() {
+    let result = "";
+    function traverse(node) {
+        if (!node) return;
+        if (node.nodeType === Node.TEXT_NODE) {
+            let text = node.textContent.trim();
+            if (text) result += " " + text;
+        } else if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
+            if (node.shadowRoot) {
+                traverse(node.shadowRoot);
+            }
+            if (node.tagName !== 'SCRIPT' && node.tagName !== 'STYLE') {
+                for (let child of node.childNodes) {
+                    traverse(child);
+                }
+            }
+        }
+    }
+    traverse(document.body);
+    return result;
+})();
+"""
+
+# JavaScript: find and click "Regenerate the response" or "Regenerate" button inside shadow roots
+_JS_CLICK_REGENERATE = """
+(function() {
+    let clicked = false;
+    function scanAndClick(root) {
+        if (clicked) return;
+        let btns = root.querySelectorAll('button, gds-button, md-text-button, gmp-button, span');
+        for (let i = 0; i < btns.length; i++) {
+            let b = btns[i];
+            let text = (b.innerText || b.textContent || '').trim().toLowerCase();
+            if (text === 'regenerate the response' || text === 'regenerate' || text.includes('regenerate')) {
+                // If it's a span, click its parent button if possible
+                let target = b;
+                if (b.tagName === 'SPAN' && b.parentElement) {
+                    target = b.parentElement;
+                }
+                
+                target.click();
+                
+                // If the button has a shadowRoot, try clicking the internal touch target
+                if (target.shadowRoot) {
+                    let internalTarget = target.shadowRoot.querySelector('#button > span.touch') || target.shadowRoot.querySelector('button');
+                    if (internalTarget) internalTarget.click();
+                }
+                
+                clicked = true;
+                return true;
+            }
+        }
+        let all = root.querySelectorAll('*');
+        for (let i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot) {
+                if(scanAndClick(all[i].shadowRoot)) return true;
+            }
+        }
+        return false;
+    }
+    return scanAndClick(document);
+})();
+"""
+
+# JavaScript: Find <video> or <source> tags deep inside Shadow DOMs that have a 'blob:' src
+_JS_GET_VIDEO_SRC = """
+(function() {
+    let result = null;
+    function scanForVideo(root) {
+        if (result) return true;
+        
+        let videos = root.querySelectorAll('video, source');
+        for (let i = 0; i < videos.length; i++) {
+            let src = (videos[i].getAttribute('src') || '').trim();
+            if (src.startsWith('blob:')) {
+                result = src;
+                return true;
+            }
+        }
+        
+        let all = root.querySelectorAll('*');
+        for (let i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot) {
+                if (scanForVideo(all[i].shadowRoot)) return true;
+            }
+        }
+        return false;
+    }
+    scanForVideo(document);
+    return result;
+})();
+"""
+
+# JavaScript: Fetch a blob URL, read it as an ArrayBuffer, convert to Base64, and return to Selenium
+_JS_FETCH_BLOB_BASE64 = """
+var blobUrl = arguments[0];
+var callback = arguments[1];
+
+fetch(blobUrl)
+    .then(response => response.blob())
+    .then(blob => {
+        var reader = new FileReader();
+        reader.onloadend = function() {
+            var b64 = reader.result.split(',')[1];
+            callback(b64);
+        };
+        reader.readAsDataURL(blob);
+    })
+    .catch(error => {
+        callback("ERROR: " + error.toString());
+    });
+"""
+
 CHROME_PATHS = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -365,6 +480,7 @@ class GeminiEnterpriseProcessor(QThread):
     log_signal      = Signal(str, str)
     progress_signal = Signal(int, str)
     finished_signal = Signal(bool, str, str)
+    prompt_status_signal = Signal(int, str)
 
     def __init__(
         self,
@@ -387,6 +503,7 @@ class GeminiEnterpriseProcessor(QThread):
         self.finished_cb    = finished_callback
         self.start_index    = start_index
         self._cancelled     = False
+        self.active_drivers = []
         self._mail_client   = MailtickingClient(log_callback=log_callback)
         self.debug_dir      = os.path.join(base_dir, "DEBUG")
 
@@ -407,6 +524,11 @@ class GeminiEnterpriseProcessor(QThread):
 
     def cancel(self):
         self._cancelled = True
+        for d in self.active_drivers:
+            try:
+                d.quit()
+            except Exception:
+                pass
 
     def _debug_dump(self, driver, label: str):
         try:
@@ -456,6 +578,8 @@ class GeminiEnterpriseProcessor(QThread):
             else:
                 driver = webdriver.Chrome(options=opts)
 
+            self.active_drivers.append(driver)
+
             if stealth and self.config.get("stealth", True):
                 stealth(driver,
                     languages=["en-US", "en"],
@@ -477,6 +601,8 @@ class GeminiEnterpriseProcessor(QThread):
     def _quit_driver(self, driver, temp_profile):
         try:
             if driver:
+                if driver in self.active_drivers:
+                    self.active_drivers.remove(driver)
                 driver.quit()
         except Exception:
             pass
@@ -802,6 +928,10 @@ class GeminiEnterpriseProcessor(QThread):
                 prompt_num = start_global_idx + current_idx + 1
 
                 self._log(f"[W-{worker_id}] --- Processing Prompt {prompt_num}/{total_prompts} ---")
+                
+                # Signal: processing started
+                if self.prompt_status_signal:
+                    self.prompt_status_signal.emit(prompt_num - 1, "loading")
 
                 result = self._process_prompt(driver, prompt, prompt_num, total_prompts, delay)
 
@@ -810,8 +940,18 @@ class GeminiEnterpriseProcessor(QThread):
                     rate_limited    = True
                     re_enter_prompt = prompt
                     break
+                elif result == "auth_error":
+                    self._log(f"[W-{worker_id}] Auth or load error detected - closing browser and recreating account...")
+                    rate_limited    = True  # Use the same browser restart flag
+                    re_enter_prompt = prompt
+                    break
                 elif result == "ok":
                     gen_retries.pop(current_idx, None)
+                    
+                    # Signal: success
+                    if self.prompt_status_signal:
+                        self.prompt_status_signal.emit(prompt_num - 1, "success")
+                        
                     current_idx += 1
                     
                     # Update global progress safely
@@ -830,6 +970,10 @@ class GeminiEnterpriseProcessor(QThread):
                             f"[W-{worker_id}] Prompt {prompt_num} failed (attempt {count}/{retries}), "
                             f"retrying after {delay}s...", "WARNING"
                         )
+                        # Signal: error (but retrying soon)
+                        if self.prompt_status_signal:
+                            self.prompt_status_signal.emit(prompt_num - 1, "error")
+                        
                         time.sleep(delay)
                         try:
                             driver.get(GEMINI_HOME_URL)
@@ -840,10 +984,17 @@ class GeminiEnterpriseProcessor(QThread):
                         re_enter_prompt = prompt
                     else:
                         self._log(f"[W-{worker_id}] Skipping prompt {prompt_num} after {count} failed attempts", "WARNING")
+                        
+                        # Signal: permanent error
+                        if self.prompt_status_signal:
+                            self.prompt_status_signal.emit(prompt_num - 1, "error")
+                            
                         gen_retries.pop(current_idx, None)
                         current_idx += 1
                         with self._completed_lock:
                             self._completed_count += 1
+                            pct = int((self._completed_count / total_prompts) * 100)
+                            self._progress(pct, f"Processed {self._completed_count}/{total_prompts} prompts")
 
             self._quit_driver(driver, temp_profile)
             if rate_limited:
@@ -864,114 +1015,74 @@ class GeminiEnterpriseProcessor(QThread):
         return False
 
     def _register_once(self, driver, worker_id=0) -> bool:
-        self._log(f"[W-{worker_id}] Step 1: Getting fresh temp email from mailticking.com")
-        mail_tab = self._mail_client.open_mailticking_tab(driver)
+        # Step 1: Buka chrome fresh (already done in _create_driver), buka business.gemini.google
+        self._log(f"[W-{worker_id}] Step 1 & 2: Membuka business.gemini.google")
+        try:
+            driver.get(GEMINI_HOME_URL)
+            WebDriverWait(driver, 20).until(lambda d: d.current_url != "about:blank")
+        except Exception:
+            pass
+        self._wait_page_ready(driver, timeout=30, extra_selector="#email-input", label="Gemini Home (Email Input)")
+        gemini_tab = driver.current_window_handle
+
+        # Step 3: Buka halaman mailticking.com
+        self._log("Step 3: Membuka mailticking.com di tab baru")
+        driver.execute_script("window.open('about:blank', '_blank');")
+        time.sleep(0.5)
+        driver.switch_to.window(driver.window_handles[-1])
+        mail_tab = driver.current_window_handle
+        
+        from App.mailticking import MAILTICKING_URL
+        driver.get(MAILTICKING_URL)
+        self._wait_page_ready(driver, timeout=30, label="mailticking.com")
+        
         email = self._mail_client.get_fresh_email(driver)
         if not email or "@" not in email:
             self._log("Failed to get temp email", "ERROR")
             return False
-        self._log(f"Temp email: {email}")
+        self._log(f"Temp email obtained: {email}")
 
-        self._log("Step 2: Opening Gemini Business in new tab")
-        for tab_try in range(1, MAX_TAB_RETRY + 1):
-            try:
-                driver.execute_script("window.open('about:blank', '_blank');")
-                time.sleep(0.5)
-                if len(driver.window_handles) > 1:
-                    driver.switch_to.window(driver.window_handles[-1])
-                    gemini_tab = driver.current_window_handle
-                    break
-                raise Exception("Tab not opened")
-            except Exception:
-                self._log(f"Tab open failed ({tab_try}/{MAX_TAB_RETRY})", "WARNING")
-                time.sleep(2)
-        else:
-            self._log("Failed to open new tab", "ERROR")
-            return False
-
-        self._log("Step 3: Entering email and submitting (with error page retry)")
-        submitted = self._submit_email_with_retry(driver, email)
+        # Step 4: Kembali ke tab Gemini, masukan email, crosscheck, submit
+        self._log("Step 4: Kembali ke Gemini, input email, crosscheck, dan lanjut")
+        driver.switch_to.window(gemini_tab)
+        
+        submitted = self._step_4_submit_email(driver, email)
         if not submitted:
-            self._log("Failed to submit email after all retries", "ERROR")
             return False
 
-        # Step 5: Verify OTP page actually loaded
-        self._log("Step 5: Waiting for OTP page to load...")
+        # Step 5: Tunggu sampai direct ke halaman accountverification.business.gemini.google/v1/verify-oob-code
+        self._log("Step 5: Tunggu OTP page dan 'code sent'")
         self._wait_page_ready(driver, timeout=20, label="OTP Page")
-        otp_page_ok = False
-        for otp_check in range(3):
-            try:
-                src = driver.page_source.lower()
-                url = driver.current_url.lower()
-                if any(k in src for k in ["verification", "verify", "code", "pin", "otp"]):
-                    otp_page_ok = True
-                    break
-                if any(k in url for k in ["verify", "otp", "challenge"]):
-                    otp_page_ok = True
-                    break
-                if self._is_error_page(driver):
-                    self._log(f"Error page on OTP step (check {otp_check+1}/3)", "WARNING")
-                    self._debug_dump(driver, f"otp_page_error_{otp_check}")
-                    time.sleep(2)
-                    continue
-                # Page might just be slow loading
-                otp_page_ok = True
-                break
-            except Exception as e:
-                self._log(f"OTP page check error: {e}", "WARNING")
-                time.sleep(2)
+        otp_page_ok = self._wait_for_otp_page(driver)
         if not otp_page_ok:
             self._log("OTP page failed to load properly", "ERROR")
             return False
-        self._log("OTP page loaded.")
+        self._log("OTP page loaded and 'Code sent' verified.")
 
-        # Step 6: Check mailticking inbox with error wrapping
-        self._log("Step 6: Checking mailticking inbox for verification email")
-        found = False
-        try:
-            found = self._mail_client.wait_for_verification_email(
-                driver,
-                mail_tab_handle   = mail_tab,
-                gemini_tab_handle = gemini_tab,
-                timeout           = OTP_TIMEOUT,
-            )
-        except Exception as e:
-            self._log(f"Error checking inbox: {e}", "ERROR")
-            self._debug_dump(driver, "inbox_check_error")
+        # Step 6: Kembali ke mailticking, refresh, klik pesan
+        self._log("Step 6: Kembali ke mailticking, cek inbox")
+        driver.switch_to.window(mail_tab)
+        found = self._mail_client.wait_for_verification_email(
+            driver,
+            mail_tab_handle   = mail_tab,
+            gemini_tab_handle = gemini_tab,
+            timeout           = OTP_TIMEOUT,
+        )
         if not found:
             self._log("Verification email not received (timeout)", "ERROR")
             return False
 
-        # Step 7: Extract OTP with retry
-        self._log("Step 7: Extracting OTP from email")
-        otp = None
-        for otp_try in range(1, 4):
-            try:
-                otp = self._mail_client.extract_verification_code(
-                    driver,
-                    mail_tab_handle = mail_tab,
-                )
-                if otp:
-                    break
-                self._log(f"OTP extraction attempt {otp_try}/3 - not found", "WARNING")
-            except Exception as e:
-                self._log(f"OTP extraction error (attempt {otp_try}/3): {e}", "WARNING")
-            time.sleep(2)
+        # Step 7: Ambil OTP, kembali ke Gemini, input OTP, verify
+        self._log("Step 7: Ambil OTP, input di Gemini, lalu verify")
+        otp = self._mail_client.extract_verification_code(driver, mail_tab_handle=mail_tab)
         if not otp:
-            self._log("Could not extract OTP after 3 attempts", "ERROR")
-            self._debug_dump(driver, "otp_extract_failed")
+            self._log("Could not extract OTP", "ERROR")
             return False
         self._log(f"OTP obtained: {otp}")
 
-        # Step 8: Enter OTP with retry
-        self._log("Step 8: Entering OTP on Gemini")
-        try:
-            driver.switch_to.window(gemini_tab)
-        except Exception as e:
-            self._log(f"Failed to switch to Gemini tab: {e}", "ERROR")
-            return False
+        driver.switch_to.window(gemini_tab)
         self._wait_page_ready(driver, timeout=15, label="Gemini Tab (OTP)")
-
+        
         otp_submitted = False
         for otp_sub_try in range(1, 4):
             otp_submitted = self._submit_otp(driver, otp)
@@ -986,15 +1097,13 @@ class GeminiEnterpriseProcessor(QThread):
         self._log("OTP entered")
         time.sleep(random.uniform(0.3, 0.6))
 
-        # Step 9: Click verify with retry
-        self._log("Step 9: Clicking Verify button")
+        # Klik verify button
         verify_clicked = False
         for verify_try in range(1, 4):
             verify_clicked = self._click_verify_button(driver)
             if verify_clicked:
                 break
             self._log(f"Verify button attempt {verify_try}/3 failed", "WARNING")
-            # Check if page already moved past verification
             try:
                 src = driver.page_source.lower()
                 if any(k in src for k in ["full name", "fullname", "agree", "get started"]):
@@ -1004,103 +1113,73 @@ class GeminiEnterpriseProcessor(QThread):
             except Exception:
                 pass
             time.sleep(2)
+            
         if not verify_clicked:
-            self._log("Verify button click failed after retries", "WARNING")
-            self._debug_dump(driver, "verify_btn_failed")
+            self._log("Verify button click failed", "WARNING")
 
-        # VALIDATE: Step 9 - check page moved past OTP verification
-        # NOTE: Do NOT use generic 'error' as failure indicator — it matches JS code in page source
+        # Step 8: Tunggu direct ke isi nama, isi full name, tekan agree & get started
+        self._log("Step 8: Tunggu isi nama, lalu Agree & get started")
         if not self._validate_step(driver, "Post-Verify",
-                success_indicators=["full name", "fullname", "agree", "get started",
-                                    "signing you in", "welcome"],
-                failure_indicators=["invalid verification code", "wrong code",
-                                    "code is incorrect", "code has expired"],
+                success_indicators=["full name", "fullname", "agree", "get started", "signing you in", "welcome"],
+                failure_indicators=["invalid verification code", "wrong code", "code is incorrect"],
                 timeout=30):
-            self._log("Step 9 validation: still on OTP page after verify", "ERROR")
-            self._debug_dump(driver, "verify_not_progressed")
             return False
 
-        # Step 10: Enter name with retry
-        self._log("Step 10: Completing signup - entering name")
         name_entered = False
         for name_try in range(1, 4):
             try:
                 name_entered = self._enter_name(driver)
                 if name_entered:
                     break
-                # Check if page already moved past name entry
                 src = driver.page_source.lower()
                 if any(k in src for k in ["signing you in", "welcome", "i'll do this later"]):
                     self._log("Page already past name entry, continuing...")
                     name_entered = True
                     break
             except Exception as e:
-                self._log(f"Name entry error (attempt {name_try}/3): {e}", "WARNING")
-            self._log(f"Name entry attempt {name_try}/3 failed, waiting...", "WARNING")
+                self._log(f"Name entry error: {e}", "WARNING")
             time.sleep(3)
+            
         if not name_entered:
             self._log("Name form not found after retries, proceeding...", "WARNING")
 
-        # VALIDATE: Step 10 - check name was accepted
         self._validate_step(driver, "Post-Name",
             success_indicators=["agree", "get started", "signing you in", "welcome"],
             timeout=10)
 
-        # Step 11: Click agree with retry
-        self._log("Step 11: Clicking 'Agree & get started'")
+        # Klik agree
         agree_clicked = False
         for agree_try in range(1, 4):
             try:
                 agree_clicked = self._click_agree_button(driver)
                 if agree_clicked:
                     break
-                # Check if page already moved past agree
                 src = driver.page_source.lower()
                 if any(k in src for k in ["signing you in", "welcome", "i'll do this later"]):
                     self._log("Page already past agree step, continuing...")
                     agree_clicked = True
                     break
             except Exception as e:
-                self._log(f"Agree button error (attempt {agree_try}/3): {e}", "WARNING")
+                self._log(f"Agree button error: {e}", "WARNING")
             time.sleep(2)
+            
         if not agree_clicked:
-            self._log("Agree button not clicked after retries", "WARNING")
+            self._log("Agree button not clicked", "WARNING")
 
-        # VALIDATE: Step 11 - check page moved to signing in
+        # Step 9: Tunggu Signing you in hilang atau direct ke /home
+        self._log("Step 9: Tunggu signing in selesai")
         if not self._validate_step(driver, "Post-Agree",
-                success_indicators=["signing you in", "welcome", "do this later",
-                                    "gemini", "search"],
-                failure_indicators=["something went wrong", "couldn't sign you in",
-                                    "try again later"],
+                success_indicators=["signing you in", "welcome", "do this later", "gemini", "search"],
+                failure_indicators=["something went wrong", "couldn't sign you in"],
                 timeout=30):
-            self._log("Step 11 validation: agree step did not progress", "ERROR")
-            self._debug_dump(driver, "agree_not_progressed")
             return False
 
-        # Step 12: Wait for signing in with error detection
-        self._log("Step 12: Waiting for 'Signing you in...' to disappear")
         sign_in_ok = self._wait_gone(driver, "h1.title", timeout=60)
-        if not sign_in_ok:
-            # Check if we're actually on the Gemini page already
-            try:
-                src = driver.page_source.lower()
-                url = driver.current_url.lower()
-                if "gemini" in url and ("welcome" in src or "search" in src):
-                    self._log("Signing in seems complete despite h1.title still present")
-                elif self._is_error_page(driver):
-                    self._log("Error page during sign-in", "ERROR")
-                    self._debug_dump(driver, "signin_error")
-                    return False
-                else:
-                    self._log("Sign-in may have stalled", "WARNING")
-                    self._debug_dump(driver, "signin_stalled")
-            except Exception:
-                pass
         self._log("Signing in completed.")
         self._wait_page_ready(driver, timeout=20, label="Post-SignIn")
 
-        # Step 13: Initial setup with retry
-        self._log("Step 13: Initial setup")
+        # Step 10: Klik i'll do this later, lalu initial setup lainnya
+        self._log("Step 10: Initial setup (dismiss popup, click tools, select Veo)")
         setup_ok = False
         for setup_try in range(1, 4):
             try:
@@ -1108,8 +1187,7 @@ class GeminiEnterpriseProcessor(QThread):
                 setup_ok = True
                 break
             except Exception as e:
-                self._log(f"Initial setup error (attempt {setup_try}/3): {e}", "WARNING")
-                self._debug_dump(driver, f"setup_error_{setup_try}")
+                self._log(f"Initial setup error: {e}", "WARNING")
                 time.sleep(3)
                 try:
                     driver.refresh()
@@ -1117,23 +1195,16 @@ class GeminiEnterpriseProcessor(QThread):
                 except Exception:
                     pass
         if not setup_ok:
-            self._log("Initial setup failed after retries", "WARNING")
             return False
-
-        # VALIDATE: Step 13 - check Gemini is ready for prompt input
-        self._validate_step(driver, "Post-InitialSetup",
-            success_indicators=["veo", "create", "prompt", "search", "prosemirror"],
-            timeout=15)
+            
         self._log("Account registration and setup completed successfully!")
         return True
 
-    # ── Submit email with error page retry ───────────────────────────────────────
-    def _submit_email_with_retry(self, driver, email: str) -> bool:
+    # ── Step methods for email & OTP verification ────────────────────────────────
+    def _step_4_submit_email(self, driver, email: str) -> bool:
         for attempt in range(1, MAX_EMAIL_SUBMIT_RETRY + 1):
-            self._log(f"Step 3-4: Submit email attempt {attempt}/{MAX_EMAIL_SUBMIT_RETRY}")
-            self._navigate_to_gemini_home(driver)
+            self._log(f"Submit email attempt {attempt}/{MAX_EMAIL_SUBMIT_RETRY}")
 
-            # Step 6: Input email menggunakan JS path yang sudah diverifikasi
             email_el = None
             try:
                 email_el = driver.execute_script('return document.querySelector("#email-input");')
@@ -1148,103 +1219,83 @@ class GeminiEnterpriseProcessor(QThread):
                 self._log("Email input not found", "WARNING")
                 self._debug_dump(driver, f"no_email_input_attempt{attempt}")
                 time.sleep(2)
+                # Ensure we're on the right page on failure
+                driver.refresh()
+                self._wait_page_ready(driver, timeout=30, extra_selector="#email-input")
                 continue
 
-            # FIX 4: Use _verified_type to guarantee the text is entered correctly
+            # Input Email
             if not self._verified_type(driver, email_el, email, field_name="Email"):
-                self._log("Email input verification failed!", "ERROR")
+                self._log("Email input typing failed!", "ERROR")
                 self._debug_dump(driver, f"email_verify_fail_{attempt}")
                 continue
 
-            # FIX 2: Cross-check - read back what is actually in the input field
-            actual_email = driver.execute_script(
-                "return arguments[0].value;", email_el
-            ) or ""
+            # Cross-check
+            actual_email = driver.execute_script("return arguments[0].value;", email_el) or ""
             if actual_email.strip().lower() != email.strip().lower():
-                self._log(
-                    f"EMAIL MISMATCH! Expected: '{email}', Got: '{actual_email}'",
-                    "ERROR"
-                )
+                self._log(f"EMAIL MISMATCH! Expected: '{email}', Got: '{actual_email}'", "ERROR")
                 self._debug_dump(driver, f"email_mismatch_{attempt}")
                 continue
             self._log(f"Email cross-check OK: '{actual_email}'")
             time.sleep(random.uniform(0.3, 0.6))
 
-            # Step 7: Klik submit button menggunakan JS path yang sudah diverifikasi
             submit_el = None
             try:
-                submit_el = driver.execute_script(
-                    'return document.querySelector("#log-in-button > span.UywwFc-RLmnJb");'
-                )
-                if submit_el and submit_el.is_displayed():
-                    self._log("Submit button found: #log-in-button > span.UywwFc-RLmnJb")
+                submit_el = driver.execute_script('return document.querySelector("#log-in-button > span.UywwFc-RLmnJb");')
             except Exception:
                 pass
 
-            if submit_el:
+            if submit_el and submit_el.is_displayed():
                 self._human_click(driver, submit_el)
                 self._log("Clicked 'Continue with email'")
             else:
                 email_el.send_keys(Keys.RETURN)
                 self._log("Pressed Enter to submit email")
 
-            # FIX: Wait for Gemini to ACTUALLY redirect to OTP/verification page
-            old_url = driver.current_url
-            self._log(f"Waiting for Gemini redirect to verification page...")
-            try:
-                # Wait for URL to actually reach the target verification page
-                # Including oauth2/authorize as seen in logs
-                WebDriverWait(driver, 60).until(
-                    lambda d: any(k in d.current_url.lower() for k in [
-                        "accountverification", "verify-oob-code", "oauth2/authorize", "signin-callback"
-                    ])
-                )
-                self._log(f"Target URL reached: {driver.current_url}")
-            except TimeoutException:
-                self._log(f"URL did not reach verification page after 60s. Current: {driver.current_url}", "WARNING")
-                self._debug_dump(driver, "email_redirect_timeout")
+            # Do not wait for OTP page here; wait logic moved to Step 5
+            return True
 
-            # Wait for the NEW page to fully load
-            self._wait_page_ready(driver, timeout=30, label="OTP/Verification Page")
-
-            # Wait for OTP page CONTENT to actually appear (not just URL)
-            otp_content_ready = False
-            for content_check in range(10):  # max ~20 seconds
-                try:
-                    src = driver.page_source.lower()
-                    if any(k in src for k in ["verification code", "enter verification",
-                                               "verify", "enter code", "sent a"]):
-                        otp_content_ready = True
-                        self._log("OTP page content confirmed loaded")
-                        break
-                except Exception:
-                    pass
-                time.sleep(2)
-            if not otp_content_ready:
-                self._log("OTP page content not detected, proceeding anyway...", "WARNING")
-                self._debug_dump(driver, "otp_content_not_found")
-
-            if self._is_error_page(driver):
-                self._log(
-                    f"Error page detected after email submit (attempt {attempt}). "
-                    "Navigating back to Gemini home...",
-                    "WARNING"
-                )
-                self._debug_dump(driver, f"email_submit_error_{attempt}")
-                if attempt < MAX_EMAIL_SUBMIT_RETRY:
-                    time.sleep(random.uniform(2, 3))
-                    continue
-                else:
-                    self._log("All email submit attempts failed due to error page", "ERROR")
-                    return False
-            else:
-                self._log(
-                    f"Email submitted successfully on attempt {attempt}, "
-                    f"page URL now: {driver.current_url}"
-                )
-                return True
-
+        self._log("Failed to submit email after all attempts", "ERROR")
         return False
+
+    def _wait_for_otp_page(self, driver) -> bool:
+        self._log(f"Waiting for Gemini redirect to verification page...")
+        try:
+            # Wait for URL to actually reach the target verification page
+            WebDriverWait(driver, 60).until(
+                lambda d: any(k in d.current_url.lower() for k in [
+                    "accountverification", "verify-oob-code", "oauth2/authorize", "signin-callback"
+                ])
+            )
+            self._log(f"Target URL reached: {driver.current_url}")
+        except TimeoutException:
+            self._log(f"URL did not reach verification page after 60s. Current: {driver.current_url}", "WARNING")
+            self._debug_dump(driver, "email_redirect_timeout")
+
+        self._wait_page_ready(driver, timeout=30, label="OTP/Verification Page Content")
+
+        otp_content_ready = False
+        for content_check in range(10):  # max ~20 seconds
+            try:
+                src = driver.page_source.lower()
+                if any(k in src for k in ["code sent", "verification code", "enter verification"]):
+                    otp_content_ready = True
+                    self._log("OTP page content ('code sent') confirmed loaded")
+                    break
+            except Exception:
+                pass
+            time.sleep(2)
+            
+        if not otp_content_ready:
+            self._log("OTP page 'code sent' not detected, proceeding anyway...", "WARNING")
+            self._debug_dump(driver, "otp_content_not_found")
+
+        if self._is_error_page(driver):
+            self._log("Error page detected passing to OTP.", "ERROR")
+            self._debug_dump(driver, "otp_error_page")
+            return False
+            
+        return True
 
     def _submit_otp(self, driver, otp: str) -> bool:
         """
@@ -1545,13 +1596,6 @@ class GeminiEnterpriseProcessor(QThread):
     def _process_prompt(
         self, driver, prompt: str, prompt_num: int, total: int, delay: int
     ) -> str:
-        if self._gemini_tab:
-            try:
-                driver.switch_to.window(self._gemini_tab)
-            except Exception as e:
-                self._log(f"Failed to switch to Gemini tab: {e}", "ERROR")
-                return "error"
-
         self._wait_page_ready(driver, timeout=15, label="Pre-Prompt Input")
         self._progress(int((prompt_num / total) * 100), f"Prompt {prompt_num}/{total}")
 
@@ -1678,6 +1722,12 @@ class GeminiEnterpriseProcessor(QThread):
             if check_i > 0 and check_i % 5 == 0:
                 try:
                     src = driver.page_source.lower()
+                    try:
+                        shadow_text = str(driver.execute_script(_JS_GET_ALL_TEXT_DEEP)).lower()
+                        src = src + " " + shadow_text
+                    except Exception:
+                        pass
+
                     if any(k in src for k in [
                         "rate limit", "quota exceeded", "try again later",
                         "too many requests", "usage limit",
@@ -1686,13 +1736,26 @@ class GeminiEnterpriseProcessor(QThread):
                         self._debug_dump(driver, f"rate_limit_no_think_{prompt_num}")
                         return "rate_limit"
                     if any(k in src for k in [
+                        "not allowed to perform this operation", "contact an administrator",
+                    ]):
+                        self._log("Permission block detected ('not allowed to perform operation'). Attempting regeneration...", "WARNING")
+                        try:
+                            # click Regenerate Button silently
+                            driver.execute_script(_JS_CLICK_REGENERATE)
+                        except Exception:
+                            pass
+                        time.sleep(2)
+                        self._log("Restarting wait cycle after regeneration...", "INFO")
+                        return self._wait_for_generation(driver, prompt_num)
+                    if any(k in src for k in [
+                        "authentication required", "invalid authentication",
                         "failed to load attachment", "failed to load",
                         "something went wrong", "couldn't generate",
                         "unable to generate", "an error occurred",
                     ]):
-                        self._log("Error message detected before thinking started", "WARNING")
+                        self._log("Error message detected before thinking started", "ERROR")
                         self._debug_dump(driver, f"gen_error_no_think_{prompt_num}")
-                        return "error"
+                        return "auth_error"
                 except Exception:
                     pass
             time.sleep(0.5)
@@ -1703,6 +1766,12 @@ class GeminiEnterpriseProcessor(QThread):
             self._debug_dump(driver, f"no_thinking_{prompt_num}")
             try:
                 src = driver.page_source.lower()
+                try:
+                    shadow_text = str(driver.execute_script(_JS_GET_ALL_TEXT_DEEP)).lower()
+                    src = src + " " + shadow_text
+                except Exception:
+                    pass
+                
                 # Check for explicit rate limit indicators
                 if any(k in src for k in [
                     "rate limit", "quota exceeded", "try again later",
@@ -1710,14 +1779,15 @@ class GeminiEnterpriseProcessor(QThread):
                 ]):
                     self._log("RATE LIMIT: explicit rate limit text found on page")
                     return "rate_limit"
-                # Check for error messages
+                # Check for auth error
                 if any(k in src for k in [
+                    "authentication required", "invalid authentication",
                     "failed to load attachment", "failed to load",
                     "something went wrong", "couldn't generate",
                     "unable to generate", "an error occurred",
                 ]):
-                    self._log("Generation error detected (no thinking)")
-                    return "error"
+                    self._log("Auth/Load error detected on page (no thinking)", "ERROR")
+                    return "auth_error"
                 # If no thinking and no visible video content, assume rate limit
                 # (the page is blank/unresponsive after the prompt)
                 has_response = any(k in src for k in [
@@ -1757,12 +1827,39 @@ class GeminiEnterpriseProcessor(QThread):
             if int(time.time() - start) % 15 == 0 and int(time.time() - start) > 0:
                 try:
                     src = driver.page_source.lower()
+                    try:
+                        shadow_text = str(driver.execute_script(_JS_GET_ALL_TEXT_DEEP)).lower()
+                        src = src + " " + shadow_text
+                    except Exception:
+                        pass
                     if any(k in src for k in [
                         "rate limit", "quota exceeded", "try again later",
                         "too many requests", "usage limit",
                     ]):
                         self._log("Rate limit detected during thinking phase")
                         return "rate_limit"
+                    if any(k in src for k in [
+                        "not allowed to perform this operation", "contact an administrator",
+                    ]):
+                        self._log("Permission block detected ('not allowed to perform operation') during thinking. Attempting regeneration...", "WARNING")
+                        try:
+                            # click Regenerate Button silently
+                            driver.execute_script(_JS_CLICK_REGENERATE)
+                        except Exception:
+                            pass
+                        time.sleep(2)
+                        self._log("Restarting wait cycle after regeneration...", "INFO")
+                        return self._wait_for_generation(driver, prompt_num)
+                    # Check for auth error during thinking
+                    if any(k in src for k in [
+                        "authentication required", "invalid authentication",
+                        "failed to load attachment", "failed to load",
+                        "something went wrong", "couldn't generate",
+                        "unable to generate", "an error occurred",
+                    ]):
+                        self._log("Error message detected during thinking", "ERROR")
+                        self._debug_dump(driver, f"gen_error_thinking_{prompt_num}")
+                        return "auth_error"
                 except Exception:
                     pass
             time.sleep(0.5)
@@ -1786,18 +1883,24 @@ class GeminiEnterpriseProcessor(QThread):
                             "failed to load", "failed", "error",
                             "couldn't generate", "unable to generate",
                             "something went wrong", "try again",
+                            "authentication required", "invalid authentication",
                         ]):
                             self._log(
                                 f"SHADOW DOM ERROR: '{attachment_text.strip()}' — "
-                                "will retry prompt", "WARNING"
+                                "triggering account restart", "WARNING"
                             )
                             self._debug_dump(driver, f"shadow_dom_error_{prompt_num}")
-                            return "error"
+                            return "auth_error"
                 except Exception:
                     pass
 
                 # SECONDARY CHECK: page source (for non-shadow-DOM errors)
                 src = driver.page_source.lower()
+                try:
+                    shadow_text = str(driver.execute_script(_JS_GET_ALL_TEXT_DEEP)).lower()
+                    src = src + " " + shadow_text
+                except Exception:
+                    pass
 
                 if any(k in src for k in [
                     "rate limit", "quota exceeded", "try again later",
@@ -1805,20 +1908,29 @@ class GeminiEnterpriseProcessor(QThread):
                 ]):
                     self._log("Rate limit message on page")
                     return "rate_limit"
-
-                # Check for generation failure messages → retry prompt
+                    
                 if any(k in src for k in [
-                    "failed to load attachment",
-                    "failed to load",
-                    "something went wrong",
-                    "couldn't generate",
-                    "unable to generate",
-                    "content generation error",
+                        "not allowed to perform this operation", "contact an administrator",
+                    ]):
+                    self._log("Permission block detected ('not allowed to perform operation') during post-generation. Attempting regeneration...", "WARNING")
+                    try:
+                        driver.execute_script(_JS_CLICK_REGENERATE)
+                    except Exception:
+                        pass
+                    time.sleep(2)
+                    self._log("Restarting wait cycle after regeneration...", "INFO")
+                    return self._wait_for_generation(driver, prompt_num)
+
+                if any(k in src for k in [
+                    "authentication required", "invalid authentication",
+                    "failed to load attachment", "failed to load",
+                    "something went wrong", "couldn't generate",
+                    "unable to generate", "content generation error",
                     "an error occurred",
                 ]):
-                    self._log("Generation failed — will retry prompt", "WARNING")
+                    self._log("Auth or Generation error detected during generation", "ERROR")
                     self._debug_dump(driver, f"gen_failed_{prompt_num}")
-                    return "error"
+                    return "auth_error"
 
                 # Check if download button is available via shadow DOM
                 try:
@@ -1843,117 +1955,63 @@ class GeminiEnterpriseProcessor(QThread):
         return self._download_video(driver, prompt_num)
 
     def _download_video(self, driver, prompt_num: int) -> str:
-        # Step 21a: Click download button with retry
-        self._log("Step 21a: Clicking download button...")
-        dl_btn = None
-        for dl_try in range(1, 4):
+        self._log(f"Step 21: Extracting generated Video Blob... (Prompt {prompt_num})")
+        
+        # 1. Locate the video blob URL inside the shadow DOM
+        blob_url = None
+        for try_idx in range(1, 4):
             try:
-                dl_btn = driver.execute_script(_JS_CLICK_DOWNLOAD)
-                if dl_btn:
-                    self._log("Download button found")
+                blob_url = driver.execute_script(_JS_GET_VIDEO_SRC)
+                if blob_url and blob_url.startswith("blob:"):
+                    self._log(f"Found Blob URL: {blob_url}")
                     break
             except Exception as e:
-                self._log(f"Download button attempt {dl_try}/3: {e}", "WARNING")
+                pass
             time.sleep(2)
-
-        if not dl_btn:
-            self._log("Download button not found after retries", "ERROR")
-            self._debug_dump(driver, "no_download_btn")
+            
+        if not blob_url:
+            self._log("Failed to locate <video> Blob URL inside Shadow DOM!", "ERROR")
+            self._debug_dump(driver, "no_blob_ext")
+            return "error"
+            
+        self._log("Fetching video blob buffer via Base64 injection... this may take a moment.")
+        
+        # 2. Inject asynchronous javascript to download the Blob via XHR and return as Base64
+        try:
+            b64_string = driver.execute_async_script(_JS_FETCH_BLOB_BASE64, blob_url)
+        except Exception as e:
+            self._log(f"Javascript Blob fetch failed: {e}", "ERROR")
+            self._debug_dump(driver, "blob_fetch_err")
+            return "error"
+            
+        if not b64_string:
+            self._log("Javascript returned an empty buffer.", "ERROR")
+            return "error"
+            
+        if b64_string.startswith("ERROR:"):
+            self._log(f"Javascript internal fetch error: {b64_string}", "ERROR")
+            return "error"
+            
+        import base64
+        self._log("Decoding Base64 payload back to binary MP4...")
+        
+        try:
+            video_data = base64.b64decode(b64_string)
+        except Exception as e:
+            self._log(f"Failed to decode base64 video string: {e}", "ERROR")
+            return "error"
+            
+        fname = f"ReenzAuto_G-Business_{prompt_num}_{int(time.time() * 1000)}.mp4"
+        dest  = os.path.join(self.output_dir, fname)
+        
+        try:
+            with open(dest, 'wb') as f:
+                f.write(video_data)
+            self._log(f"Video saved natively to: {fname}", "SUCCESS")
+        except Exception as e:
+            self._log(f"Could not write file to disk: {e}", "ERROR")
             return "error"
 
-        try:
-            driver.execute_script(
-                "arguments[0].scrollIntoView({block:'center'});", dl_btn)
-            time.sleep(0.5)
-            self._js_click(driver, dl_btn)
-            self._log("Download button clicked")
-        except Exception as e:
-            self._log(f"Download button click error: {e}", "WARNING")
-            # Retry click
-            try:
-                dl_btn = driver.execute_script(_JS_CLICK_DOWNLOAD)
-                if dl_btn:
-                    self._js_click(driver, dl_btn)
-                    self._log("Download button clicked (retry)")
-            except Exception:
-                self._log("Download button click failed", "ERROR")
-                return "error"
-        time.sleep(random.uniform(1.5, 2.5))
-
-        # Step 21b: Click confirmation with retry
-        self._log("Step 21b: Waiting for download confirmation popup...")
-        confirm_clicked = False
-        for conf_try in range(1, 4):
-            try:
-                confirm_btn = driver.execute_script(_JS_CLICK_CONFIRM)
-                if confirm_btn:
-                    self._js_click(driver, confirm_btn)
-                    self._log("Confirmation button clicked")
-                    confirm_clicked = True
-                    break
-            except Exception as e:
-                if conf_try < 3:
-                    self._log(f"Confirmation attempt {conf_try}/3: {e}", "WARNING")
-                    time.sleep(1.5)
-                else:
-                    self._log(f"Confirmation button error: {e}", "WARNING")
-
-        if not confirm_clicked:
-            self._log("No confirmation popup - download may proceed directly", "WARNING")
-
-        time.sleep(random.uniform(1, 2))
-
-        # Wait for file with progress logging
-        self._log("Waiting for video file to appear...")
-        last_log_time = time.time()
-        for wait_sec in range(120):
-            time.sleep(1)
-            try:
-                files = [
-                    f for f in os.listdir(self.output_dir)
-                    if f.lower().endswith((".mp4", ".webm"))
-                    and not f.endswith(".crdownload")
-                    and not f.endswith(".tmp")
-                ]
-            except Exception:
-                files = []
-
-            if files:
-                newest = max(
-                    [os.path.join(self.output_dir, f) for f in files],
-                    key=os.path.getmtime
-                )
-                fname = (
-                    f"ReenzAuto_G-Business_{prompt_num}_"
-                    f"{int(time.time() * 1000)}.mp4"
-                )
-                dest = os.path.join(self.output_dir, fname)
-                try:
-                    if newest != dest:
-                        os.rename(newest, dest)
-                    newest = dest
-                except Exception:
-                    pass
-                self._log(f"Video saved: {os.path.basename(newest)}")
-                self._log(f"Successfully processed prompt {prompt_num}")
-                return "ok"
-
-            # Log download progress (crdownload files indicate active download)
-            if time.time() - last_log_time > 15:
-                try:
-                    downloading = [
-                        f for f in os.listdir(self.output_dir)
-                        if f.endswith(".crdownload")
-                    ]
-                    if downloading:
-                        self._log(f"Download in progress... ({wait_sec}s)")
-                    else:
-                        self._log(f"Waiting for download to start... ({wait_sec}s)")
-                except Exception:
-                    pass
-                last_log_time = time.time()
-
-        self._log("File did not appear after 120s", "WARNING")
-        self._debug_dump(driver, "no_file_after_download")
-        return "error"
+        self._log(f"Successfully processed prompt {prompt_num}")
+        return "ok"
 

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QSpinBox, QCheckBox,
     QTextEdit, QFileDialog, QProgressBar, QFrame, QScrollArea, QSizePolicy,
-    QStackedWidget, QToolButton, QFormLayout, QMessageBox
+    QStackedWidget, QToolButton, QFormLayout, QMessageBox, QListWidget, QListWidgetItem
 )
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont, QTextCursor
@@ -266,16 +266,63 @@ class MainWindow(QMainWindow):
         hdr.addWidget(self.badge_count, alignment=Qt.AlignVCenter)
         ly.addLayout(hdr)
 
-        self.prompts_text = QTextEdit()
-        self.prompts_text.textChanged.connect(self._update_badge)
+        inp_lay = QHBoxLayout()
+        self.prompt_input = QLineEdit()
+        self.prompt_input.setPlaceholderText("Type a new prompt and press Enter...")
+        self.prompt_input.setMinimumHeight(44)
+        self.prompt_input.setStyleSheet(f"background:{C['input']}; color:{C['text']}; border:1px solid {C['border']}; border-radius:4px; padding:0 12px; font-size:10pt;")
+        
+        btn_add_inline = QPushButton(" Add")
+        btn_add_inline.setIcon(qta.icon("fa5s.plus", color=C['accent']))
+        btn_add_inline.setMinimumHeight(44)
+        btn_add_inline.setObjectName("GhostBtn")
+        
+        inp_lay.addWidget(self.prompt_input, stretch=1)
+        inp_lay.addWidget(btn_add_inline)
+        ly.addLayout(inp_lay)
+        
+        self.prompts_list = QListWidget()
+        self.prompts_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.prompts_list.setStyleSheet(f"QListWidget {{ background: {C['input']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 4px; }} "
+                                         f"QListWidget::item {{ margin-bottom: 4px; border-bottom: 1px solid {C['border']}; padding: 8px; color: {C['text']}; font-weight: 500; font-size: 10pt; }}")
+        ly.addWidget(self.prompts_list, stretch=1)
+
+        def _add_prompt():
+            text = self.prompt_input.text().strip()
+            if text:
+                item = QListWidgetItem(text)
+                item.setFlags(item.flags() | Qt.ItemIsEditable)
+                item.setIcon(qta.icon("fa5s.align-left", color=C['text_muted']))
+                self.prompts_list.addItem(item)
+                self.prompt_input.clear()
+                self._update_badge()
+                
+        self.prompt_input.returnPressed.connect(_add_prompt)
+        btn_add_inline.clicked.connect(_add_prompt)
+        
+        self.prompts_list.model().dataChanged.connect(self._update_badge)
+        self.prompts_list.model().rowsRemoved.connect(self._update_badge)
+        self.prompts_list.model().rowsInserted.connect(self._update_badge)
+        self.btn_in_add = btn_add_inline
+
+        def _on_list_key(e):
+            if e.key() in (Qt.Key_Delete, Qt.Key_Backspace) and not self._running:
+                for item in self.prompts_list.selectedItems():
+                    self.prompts_list.takeItem(self.prompts_list.row(item))
+            else:
+                QListWidget.keyPressEvent(self.prompts_list, e)
+        self.prompts_list.keyPressEvent = _on_list_key
         
         try:
             with open(os.path.join(_PROJECT_ROOT, "prompts.txt"), "r", encoding="utf-8") as f:
-                self.prompts_text.setPlainText(f.read().strip())
+                for line in f.read().splitlines():
+                    if line.strip():
+                        item = QListWidgetItem(line.strip())
+                        item.setFlags(item.flags() | Qt.ItemIsEditable)
+                        item.setIcon(qta.icon("fa5s.align-left", color=C['text_muted']))
+                        self.prompts_list.addItem(item)
         except Exception:
             pass
-            
-        ly.addWidget(self.prompts_text, stretch=1)
 
         ctrl = QHBoxLayout(); ctrl.setSpacing(10)
         b_add = QPushButton("  Import TXT"); b_add.setObjectName("GhostBtn")
@@ -283,7 +330,7 @@ class MainWindow(QMainWindow):
         b_add.clicked.connect(self._import_txt)
         b_clr = QPushButton("  Clear All"); b_clr.setObjectName("DangerBtn")
         b_clr.setIcon(qta.icon("fa5s.trash", color=C['error'])); b_clr.setMinimumHeight(40)
-        b_clr.clicked.connect(lambda: self.prompts_text.clear())
+        b_clr.clicked.connect(lambda: self.prompts_list.clear())
         ctrl.addWidget(b_add); ctrl.addWidget(b_clr); ctrl.addStretch()
 
         self.btn_start = QPushButton("  START AUTOMATION"); self.btn_start.setObjectName("PrimaryBtn")
@@ -411,10 +458,14 @@ class MainWindow(QMainWindow):
             btn.setIcon(qta.icon(icon, color=C['primary_h'] if btn.isChecked() else C['text_muted']))
 
     def _get_prompts(self):
-        return [l.strip() for l in self.prompts_text.toPlainText().splitlines() if l.strip()]
+        prompts = []
+        for i in range(self.prompts_list.count()):
+            text = self.prompts_list.item(i).text().strip()
+            if text: prompts.append(text)
+        return prompts
 
-    def _update_badge(self):
-        n = len(self._get_prompts())
+    def _update_badge(self, *args):
+        n = self.prompts_list.count()
         self.badge_count.setText(f"{n} PROMPT{'S' if n != 1 else ''} QUEUED")
 
     def _import_txt(self):
@@ -422,7 +473,12 @@ class MainWindow(QMainWindow):
         if path:
             try:
                 with open(path, "r", encoding="utf-8") as f:
-                    self.prompts_text.setPlainText(f.read().strip())
+                    for line in f.read().splitlines():
+                        if line.strip():
+                            item = QListWidgetItem(line.strip())
+                            item.setFlags(item.flags() | Qt.ItemIsEditable)
+                            item.setIcon(qta.icon("fa5s.align-left", color=C['text_muted']))
+                            self.prompts_list.addItem(item)
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to read file:\n{e}")
 
@@ -481,8 +537,24 @@ class MainWindow(QMainWindow):
         self.prog_lbl.setText("Automation completed." if ok else "Stopped or failed.")
         self.prog_pct.setText("100%" if ok else "--")
         self._log(f"{'DONE: ' if ok else 'STOPPED: '}{msg}", "SUCCESS" if ok else "ERROR")
+        self.prompt_input.show()
+        self.btn_in_add.show()
+        for i in range(self.prompts_list.count()):
+            item = self.prompts_list.item(i)
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
         if path:
             self._log(f"Output saved to: {path}", "INFO")
+
+    def _update_prompt_status(self, idx, status):
+        item = self.prompts_list.item(idx)
+        if not item: return
+        if status == "loading":
+            item.setIcon(qta.icon("fa5s.spinner", color=C['accent']))
+            item.setForeground(Qt.white)  
+        elif status == "success":
+            item.setIcon(qta.icon("fa5s.check-circle", color=C['success']))
+        elif status == "error":
+            item.setIcon(qta.icon("fa5s.times-circle", color=C['error']))
 
     def _start(self):
         prompts = self._get_prompts()
@@ -511,11 +583,20 @@ class MainWindow(QMainWindow):
         self.processor.log_signal.connect(self._log)
         self.processor.progress_signal.connect(self._on_progress)
         self.processor.finished_signal.connect(self._on_finished)
+        self.processor.prompt_status_signal.connect(self._update_prompt_status)
+        
+        self.prompt_input.hide()
+        self.btn_in_add.hide()
+        for i in range(self.prompts_list.count()):
+            item = self.prompts_list.item(i)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            item.setIcon(qta.icon("fa5s.hourglass-half", color=C['text_muted']))
+            
         self.processor.start()
 
     def _cancel(self):
         if self.processor: self.processor.cancel()
-        self._log("Force stop requested — terminating workers...", "ERROR")
+        self._log("Force stop requested — terminating workers and cleaning up...", "ERROR")
 
     def closeEvent(self, e):
         if self._running:
