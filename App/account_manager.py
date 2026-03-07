@@ -20,10 +20,26 @@ from App.js_constants import (
     _JS_CLICK_VEO,
 )
 
-GEMINI_HOME_URL = "https://business.gemini.google/"
-OTP_TIMEOUT = 90
-MAX_ACCOUNT_RETRY = 3
-MAX_EMAIL_SUBMIT_RETRY = 3
+GEMINI_HOME_URL        = "https://business.gemini.google/"
+OTP_TIMEOUT            = 90
+MAX_ACCOUNT_RETRY      = 3
+MAX_EMAIL_SUBMIT_RETRY = 5   # dinaikkan karena ada kemungkinan retry dari error page
+
+# JS path exact untuk tombol "Sign up or sign in" di error page
+_JS_SIGN_IN_ERROR_BTN = (
+    'return document.querySelector('
+    '"#yDmH0d > c-wiz > div > div > div > div > div > div '
+    '> div > div > div > div > div > button > span.AeBiU-vQzf8d");'
+)
+
+# Teks yang mengindikasikan error page "Let's try something else"
+_ERROR_PAGE_INDICATORS = [
+    "let's try something else",
+    "lets try something else",
+    "trouble retrieving the email",
+    "go back to sign up or sign in",
+    "sign up or sign in",
+]
 
 FIRST_NAMES = [
     "Tyler", "Jordan", "Casey", "Morgan", "Avery", "Riley", "Quinn",
@@ -227,9 +243,143 @@ class AccountManagerMixin:
         self._log("Account registration and setup completed successfully!")
         return True
 
+    # =========================================================================
+    # Helper: deteksi dan tangani error page "Let's try something else"
+    # =========================================================================
+
+    def _is_lets_try_error_page(self, driver) -> bool:
+        """Return True jika halaman menampilkan error 'Let's try something else'."""
+        try:
+            src = driver.page_source.lower()
+            return any(k in src for k in _ERROR_PAGE_INDICATORS)
+        except Exception:
+            return False
+
+    def _handle_lets_try_something_else(self, driver, email: str) -> bool:
+        """
+        Deteksi error page "Let's try something else".
+        Klik tombol 'Sign up or sign in', tunggu kembali ke halaman email input,
+        lalu submit email lagi.
+        Return True jika berhasil kembali ke OTP flow.
+        """
+        self._log(
+            "[!] 'Let's try something else' page detected! "
+            "Clicking 'Sign up or sign in'...",
+            "WARNING"
+        )
+        self._debug_dump(driver, "lets_try_error_page")
+
+        clicked = False
+
+        # Priority 1: exact JS path dari inspect element
+        try:
+            btn = driver.execute_script(_JS_SIGN_IN_ERROR_BTN)
+            if btn and btn.is_displayed():
+                driver.execute_script("arguments[0].click();", btn)
+                self._log("Clicked 'Sign up or sign in' via exact JS path")
+                clicked = True
+        except Exception as e:
+            self._log(f"Exact JS path click error: {e}", "WARNING")
+
+        # Priority 2: cari tombol/link berdasarkan text
+        if not clicked:
+            for tag in ["button", "a", "span"]:
+                try:
+                    for el in driver.find_elements(By.TAG_NAME, tag):
+                        txt = (el.text or "").strip().lower()
+                        if "sign up" in txt or "sign in" in txt:
+                            if el.is_displayed():
+                                driver.execute_script("arguments[0].click();", el)
+                                self._log(f"Clicked 'Sign up or sign in' via text fallback ({tag})")
+                                clicked = True
+                                break
+                except Exception:
+                    pass
+                if clicked:
+                    break
+
+        # Priority 3: span class AeBiU-vQzf8d (inner span dari button)
+        if not clicked:
+            try:
+                spans = driver.find_elements(By.CSS_SELECTOR, "span.AeBiU-vQzf8d")
+                for span in spans:
+                    if span.is_displayed():
+                        # Klik parent button-nya
+                        try:
+                            parent = span.find_element(By.XPATH, "./ancestor::button")
+                            driver.execute_script("arguments[0].click();", parent)
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", span)
+                        self._log("Clicked 'Sign up or sign in' via span.AeBiU-vQzf8d")
+                        clicked = True
+                        break
+            except Exception:
+                pass
+
+        if not clicked:
+            self._log("'Sign up or sign in' button not found, navigating to home...", "WARNING")
+            try:
+                driver.get(GEMINI_HOME_URL)
+            except Exception:
+                pass
+
+        # Tunggu halaman kembali ke email input
+        self._log("Waiting for email input page to load...")
+        try:
+            WebDriverWait(driver, 20).until(
+                lambda d: any(k in d.current_url.lower() for k in [
+                    "business.gemini.google",
+                    "accounts.google",
+                    "gemini.google",
+                ]) and "lets-try" not in d.current_url.lower()
+            )
+        except TimeoutException:
+            pass
+
+        self._wait_page_ready(driver, timeout=20, label="Post-ErrorPage Recovery")
+
+        # Verifikasi email input sudah ada
+        email_el_present = False
+        for check in range(8):
+            try:
+                el = driver.execute_script('return document.querySelector("#email-input");')
+                if el and el.is_displayed():
+                    email_el_present = True
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+
+        if not email_el_present:
+            self._log("Email input not found after recovery, navigating to home...", "WARNING")
+            try:
+                driver.get(GEMINI_HOME_URL)
+                self._wait_page_ready(driver, timeout=20, extra_selector="#email-input")
+            except Exception:
+                pass
+
+        self._log("Recovery complete - re-submitting email...")
+        return True
+
+    # =========================================================================
+    # Step 4: Submit email + handle error page
+    # =========================================================================
+
     def _step_4_submit_email(self, driver, email: str) -> bool:
         for attempt in range(1, MAX_EMAIL_SUBMIT_RETRY + 1):
             self._log(f"Submit email attempt {attempt}/{MAX_EMAIL_SUBMIT_RETRY}")
+
+            # ── Cek dulu apakah kita di error page ──────────────────────────────────
+            if self._is_lets_try_error_page(driver):
+                recovered = self._handle_lets_try_something_else(driver, email)
+                if not recovered:
+                    self._log("Recovery from error page failed", "ERROR")
+                    return False
+                # Setelah recovery, lanjut ke input email di attempt berikutnya
+                time.sleep(1)
+                continue
+
+            # ── Cari email input ──────────────────────────────────────────────────
             email_el = None
             try:
                 email_el = driver.execute_script('return document.querySelector("#email-input");')
@@ -263,7 +413,9 @@ class AccountManagerMixin:
 
             submit_el = None
             try:
-                submit_el = driver.execute_script('return document.querySelector("#log-in-button > span.UywwFc-RLmnJb");')
+                submit_el = driver.execute_script(
+                    'return document.querySelector("#log-in-button > span.UywwFc-RLmnJb");'
+                )
             except Exception:
                 pass
 
@@ -273,22 +425,53 @@ class AccountManagerMixin:
             else:
                 email_el.send_keys(Keys.RETURN)
                 self._log("Pressed Enter to submit email")
+
+            # ── Tunggu sebentar lalu cek apakah langsung kena error page ─────────
+            time.sleep(2)
+            if self._is_lets_try_error_page(driver):
+                self._log("Error page appeared immediately after submit", "WARNING")
+                recovered = self._handle_lets_try_something_else(driver, email)
+                if not recovered:
+                    return False
+                continue  # retry submit dari awal
+
             return True
 
         self._log("Failed to submit email after all attempts", "ERROR")
         return False
 
+    # =========================================================================
     def _wait_for_otp_page(self, driver) -> bool:
         self._log("Waiting for Gemini redirect to verification page...")
-        try:
-            WebDriverWait(driver, 60).until(
-                lambda d: any(k in d.current_url.lower() for k in [
-                    "accountverification", "verify-oob-code", "oauth2/authorize", "signin-callback"
-                ])
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            try:
+                url = driver.current_url.lower()
+                # Sukses: sudah di OTP page
+                if any(k in url for k in [
+                    "accountverification", "verify-oob-code",
+                    "oauth2/authorize", "signin-callback"
+                ]):
+                    self._log(f"Target URL reached: {driver.current_url}")
+                    break
+
+                # Error page terdeteksi saat menunggu redirect
+                if self._is_lets_try_error_page(driver):
+                    self._log(
+                        "'Let's try something else' detected while waiting for OTP redirect!",
+                        "WARNING"
+                    )
+                    self._debug_dump(driver, "lets_try_during_otp_wait")
+                    return False  # signal ke _register_once untuk retry
+
+            except Exception:
+                pass
+            time.sleep(1)
+        else:
+            self._log(
+                f"URL did not reach verification page after 60s. Current: {driver.current_url}",
+                "WARNING"
             )
-            self._log(f"Target URL reached: {driver.current_url}")
-        except TimeoutException:
-            self._log(f"URL did not reach verification page after 60s. Current: {driver.current_url}", "WARNING")
             self._debug_dump(driver, "email_redirect_timeout")
 
         self._wait_page_ready(driver, timeout=30, label="OTP/Verification Page Content")
@@ -297,6 +480,16 @@ class AccountManagerMixin:
         for content_check in range(10):
             try:
                 src = driver.page_source.lower()
+
+                # Sekali lagi cek error page di sini
+                if any(k in src for k in _ERROR_PAGE_INDICATORS):
+                    self._log(
+                        "'Let's try something else' detected on OTP wait!",
+                        "WARNING"
+                    )
+                    self._debug_dump(driver, "lets_try_on_otp_content_check")
+                    return False
+
                 if any(k in src for k in ["code sent", "verification code", "enter verification"]):
                     otp_content_ready = True
                     self._log("OTP page content ('code sent') confirmed loaded")
