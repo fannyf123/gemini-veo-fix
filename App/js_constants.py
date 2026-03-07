@@ -160,15 +160,23 @@ _JS_CLICK_VEO = """
                 for (var ii = 0; ii < items.length; ii++) {
                     var txt = (items[ii].textContent || items[ii].innerText || "").toLowerCase();
                     if (txt.includes("veo") || txt.includes("video")) {
+                        // Try clicking md-icon inside the menu item first (user's confirmed path)
+                        var icon = items[ii].querySelector("md-icon");
+                        if (icon) { icon.click(); return true; }
+                        // Fallback: click the item's inner div or the item itself
+                        var innerDiv = items[ii].querySelector("div");
+                        if (innerDiv) { innerDiv.click(); return true; }
                         items[ii].click();
                         return true;
                     }
                 }
             }
 
-            // Last resort: try the exact nth-child(7) path directly
-            var direct = sbRoot.querySelector("div > form > div > div.actions-buttons.omnibar.multiline-input-actions-buttons > div.tools-button-container > md-menu > div:nth-child(7) > md-menu-item > div");
-            if (direct) { direct.click(); return true; }
+            // Last resort: try the exact nth-child(7) path targeting md-icon directly
+            var directIcon = sbRoot.querySelector("div > form > div > div.actions-buttons.omnibar.multiline-input-actions-buttons > div.tools-button-container > md-menu > div:nth-child(7) > md-menu-item > md-icon");
+            if (directIcon) { directIcon.click(); return true; }
+            var directDiv = sbRoot.querySelector("div > form > div > div.actions-buttons.omnibar.multiline-input-actions-buttons > div.tools-button-container > md-menu > div:nth-child(7) > md-menu-item > div");
+            if (directDiv) { directDiv.click(); return true; }
         }
     }
 
@@ -178,6 +186,8 @@ _JS_CLICK_VEO = """
         for (var i = 0; i < items.length; i++) {
             var txt = (items[i].textContent || items[i].innerText || "").toLowerCase();
             if (txt.includes("veo") || txt.includes("video")) {
+                var icon = items[i].querySelector("md-icon");
+                if (icon) { icon.click(); return true; }
                 items[i].click();
                 return true;
             }

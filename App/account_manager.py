@@ -666,13 +666,9 @@ class AccountManagerMixin:
         return False
 
     def _initial_setup(self, driver):
-        # Wait for shadow DOM components to fully render
-        self._log("Waiting for shadow DOM components to render...")
-        time.sleep(3)
-
         self._log("Step 16: Closing 'I'll do this later' popup...")
         dismissed = False
-        for dismiss_try in range(1, 6):
+        for dismiss_try in range(1, 4):
             try:
                 result = driver.execute_script(_JS_DISMISS_POPUP)
                 if result:
@@ -680,15 +676,15 @@ class AccountManagerMixin:
                     dismissed = True
                     break
             except Exception as e:
-                if dismiss_try < 5:
-                    self._log(f"Dismiss popup attempt {dismiss_try}/5: {e}", "WARNING")
+                if dismiss_try < 3:
+                    self._log(f"Dismiss popup attempt {dismiss_try}/3: {e}", "WARNING")
+                    time.sleep(2)
                 else:
                     self._log(f"Dismiss popup error: {e}", "WARNING")
-            time.sleep(2)
 
         if not dismissed:
             self._log("No 'do this later' popup found, proceeding...", "WARNING")
-        time.sleep(1)
+        self._wait_page_ready(driver, timeout=15, label="Post-Dismiss Popup")
 
         self._log("Step 17: Clicking tools button...")
         tools_clicked = False
@@ -701,26 +697,15 @@ class AccountManagerMixin:
                     break
             except Exception as e:
                 self._log(f"Tools button attempt {tools_try}/5: {e}", "WARNING")
-            # Wait progressively longer between attempts (no refresh — it destroys shadow DOM state)
-            wait_time = min(2 + tools_try, 5)
-            self._log(f"Waiting {wait_time}s for shadow DOM to render...", "WARNING")
-            time.sleep(wait_time)
-            # Only refresh as absolute last resort
-            if tools_try == 4:
-                self._log("Last resort: refreshing page...", "WARNING")
-                try:
-                    driver.refresh()
-                    self._wait_page_ready(driver, timeout=20, label="Tools Refresh")
-                    time.sleep(3)  # Extra wait after refresh for shadow DOM
-                except Exception:
-                    pass
+            if tools_try < 5:
+                time.sleep(3)
 
         if not tools_clicked:
             self._log("Tools button not found after retries", "WARNING")
             self._debug_dump(driver, "tools_btn_not_found")
             return
 
-        # Wait for the tools menu to open/animate
+        # Wait for the tools menu to fully open/animate
         time.sleep(2)
 
         self._log("Step 18: Selecting 'Create videos with Veo'...")
