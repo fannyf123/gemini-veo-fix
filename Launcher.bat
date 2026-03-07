@@ -243,36 +243,6 @@ echo.
 
 
 rem ---------------------------------------------------------------
-rem  STEP 7 : CEK PROMPTS.TXT
-rem ---------------------------------------------------------------
-echo  [7/7] Memeriksa file prompts...
-if not exist "prompts.txt" (
-    echo   prompts.txt tidak ada. Membuat contoh...
-    echo A golden sunset over a mountain lake with reflections in 4K> prompts.txt
-    echo A futuristic city at night with flying cars and neon lights>> prompts.txt
-    echo A butterfly landing on a flower in slow motion close-up>> prompts.txt
-    echo   [OK] prompts.txt dibuat dengan 3 contoh.
-    echo.
-    echo  --------------------------------------------------------------
-    echo   PENTING: Edit prompts.txt dan ganti dengan prompt video kamu!
-    echo   Satu baris = satu video yang akan digenerate.
-    echo  --------------------------------------------------------------
-    echo.
-    set /p OPEN_PRM=  Buka prompts.txt untuk diedit sekarang? ^(y/n^): 
-    if /i "!OPEN_PRM!"=="y" (
-        start notepad prompts.txt
-        echo   Tutup Notepad setelah selesai lalu tekan tombol apapun...
-        pause >nul
-    )
-) else (
-    set LINE_COUNT=0
-    for /f "usebackq" %%A in ("prompts.txt") do set /a LINE_COUNT+=1
-    echo   [OK] prompts.txt ditemukan - !LINE_COUNT! prompt siap.
-)
-echo.
-
-
-rem ---------------------------------------------------------------
 rem  JALANKAN APLIKASI GUI
 rem ---------------------------------------------------------------
 echo  ==============================================================
