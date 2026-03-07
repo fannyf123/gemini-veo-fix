@@ -77,7 +77,7 @@ _JS_CLICK_TOOLS = """
             var searchBar = landing.shadowRoot.querySelector(searchBarSelectors[si]);
             if (!searchBar || !searchBar.shadowRoot) continue;
 
-            // Try clicking md-icon inside #tool-selector-menu-anchor first (user's confirmed path)
+            // Try clicking md-icon inside #tool-selector-menu-anchor first
             var anchor = searchBar.shadowRoot.querySelector("#tool-selector-menu-anchor");
             if (anchor) {
                 var mdIcon = anchor.querySelector("md-icon");
@@ -97,7 +97,23 @@ _JS_CLICK_TOOLS = """
             }
         }
     }
-    return false;
+
+    // Deep-scan fallback: search ALL shadow roots for the tools button
+    function deepScan(root) {
+        var anchor = root.querySelector ? root.querySelector("#tool-selector-menu-anchor") : null;
+        if (anchor) {
+            var mdIcon = anchor.querySelector("md-icon");
+            if (mdIcon) { mdIcon.click(); return true; }
+            anchor.click();
+            return true;
+        }
+        var all = root.querySelectorAll ? root.querySelectorAll("*") : [];
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot && deepScan(all[i].shadowRoot)) return true;
+        }
+        return false;
+    }
+    return deepScan(document);
 })();
 """
 
@@ -155,7 +171,24 @@ _JS_CLICK_VEO = """
             if (direct) { direct.click(); return true; }
         }
     }
-    return false;
+
+    // Deep-scan fallback: search ALL shadow roots for Veo menu item
+    function deepScan(root) {
+        var items = root.querySelectorAll ? root.querySelectorAll("md-menu-item") : [];
+        for (var i = 0; i < items.length; i++) {
+            var txt = (items[i].textContent || items[i].innerText || "").toLowerCase();
+            if (txt.includes("veo") || txt.includes("video")) {
+                items[i].click();
+                return true;
+            }
+        }
+        var all = root.querySelectorAll ? root.querySelectorAll("*") : [];
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot && deepScan(all[i].shadowRoot)) return true;
+        }
+        return false;
+    }
+    return deepScan(document);
 })();
 """
 

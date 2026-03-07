@@ -3,7 +3,7 @@
   "headless": false,
   "delay": 5,
   "retry": 3,
-  "max_workers": 3,
-  "stealth": true,
+  "max_workers": 1,
+  "stealth": false,
   "theme": "dark"
 }
