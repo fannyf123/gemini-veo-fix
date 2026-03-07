@@ -27,10 +27,9 @@ _JS_APP_ROOT = "document.querySelector('body > ucs-standalone-app')"
 _JS_DISMISS_POPUP = """
 (function() {
     var app = document.querySelector("body > ucs-standalone-app");
-    if (!app || !app.shadowRoot) return null;
+    if (!app || !app.shadowRoot) return false;
     var dialog = app.shadowRoot.querySelector("ucs-welcome-dialog");
-    if (!dialog || !dialog.shadowRoot) return null;
-    // Try multiple button selectors
+    if (!dialog || !dialog.shadowRoot) return false;
     var selectors = [
         "div > md-dialog > div:nth-child(3) > md-text-button",
         "md-dialog md-text-button",
@@ -39,11 +38,11 @@ _JS_DISMISS_POPUP = """
     for (var i = 0; i < selectors.length; i++) {
         var btn = dialog.shadowRoot.querySelector(selectors[i]);
         if (btn) {
-            var touch = btn.shadowRoot ? btn.shadowRoot.querySelector("#button > span.touch") : null;
-            return touch || btn;
+            btn.click();
+            return true;
         }
     }
-    return null;
+    return false;
 })();
 """
 
@@ -54,10 +53,9 @@ _JS_DISMISS_POPUP = """
 _JS_CLICK_TOOLS = """
 (function() {
     var app = document.querySelector("body > ucs-standalone-app");
-    if (!app || !app.shadowRoot) return null;
+    if (!app || !app.shadowRoot) return false;
     var appRoot = app.shadowRoot;
 
-    // Candidate paths to ucs-chat-landing
     var landingSelectors = [
         "div > div.ucs-standalone-outer-row-container > div > main > ucs-chat-landing",
         "div > div.ucs-standalone-outer-row-container > div > ucs-chat-landing",
@@ -69,7 +67,6 @@ _JS_CLICK_TOOLS = """
         var landing = appRoot.querySelector(landingSelectors[li]);
         if (!landing || !landing.shadowRoot) continue;
 
-        // Candidate paths to ucs-search-bar
         var searchBarSelectors = [
             "div > div > div > div.fixed-content > ucs-search-bar",
             "div > div > div > ucs-search-bar",
@@ -80,23 +77,27 @@ _JS_CLICK_TOOLS = """
             var searchBar = landing.shadowRoot.querySelector(searchBarSelectors[si]);
             if (!searchBar || !searchBar.shadowRoot) continue;
 
-            // Candidate paths to tool-selector-menu-anchor
-            var anchorSelectors = [
-                "#tool-selector-menu-anchor",
+            // Try clicking md-icon inside #tool-selector-menu-anchor first (user's confirmed path)
+            var anchor = searchBar.shadowRoot.querySelector("#tool-selector-menu-anchor");
+            if (anchor) {
+                var mdIcon = anchor.querySelector("md-icon");
+                if (mdIcon) { mdIcon.click(); return true; }
+                anchor.click();
+                return true;
+            }
+
+            // Fallback selectors
+            var fallbackSelectors = [
                 "div > form > div > div.actions-buttons > div.tools-button-container > md-icon-button",
                 "[id='tool-selector-menu-anchor']"
             ];
-
-            for (var ai = 0; ai < anchorSelectors.length; ai++) {
-                var anchor = searchBar.shadowRoot.querySelector(anchorSelectors[ai]);
-                if (!anchor) continue;
-                // Return inner touch span, or anchor itself
-                var touch = anchor.shadowRoot ? anchor.shadowRoot.querySelector("#button > span.touch") : null;
-                return touch || anchor;
+            for (var ai = 0; ai < fallbackSelectors.length; ai++) {
+                var el = searchBar.shadowRoot.querySelector(fallbackSelectors[ai]);
+                if (el) { el.click(); return true; }
             }
         }
     }
-    return null;
+    return false;
 })();
 """
 
@@ -106,7 +107,7 @@ _JS_CLICK_TOOLS = """
 _JS_CLICK_VEO = """
 (function() {
     var app = document.querySelector("body > ucs-standalone-app");
-    if (!app || !app.shadowRoot) return null;
+    if (!app || !app.shadowRoot) return false;
     var appRoot = app.shadowRoot;
 
     var landingSelectors = [
@@ -131,11 +132,10 @@ _JS_CLICK_VEO = """
             if (!searchBar || !searchBar.shadowRoot) continue;
             var sbRoot = searchBar.shadowRoot;
 
-            // Try specific Veo menu item selectors
+            // Search all md-menu-item elements for text containing "veo" or "video"
             var veoSelectors = [
-                "div > form > div > div.actions-buttons.omnibar.multiline-input-actions-buttons > div.tools-button-container > md-menu > div:nth-child(7) > md-menu-item > div",
-                "md-menu md-menu-item > div",
-                "md-menu-item > div",
+                "div > form > div > div.actions-buttons.omnibar.multiline-input-actions-buttons > div.tools-button-container > md-menu > div:nth-child(7) > md-menu-item",
+                "md-menu md-menu-item",
                 "md-menu-item"
             ];
 
@@ -144,18 +144,18 @@ _JS_CLICK_VEO = """
                 for (var ii = 0; ii < items.length; ii++) {
                     var txt = (items[ii].textContent || items[ii].innerText || "").toLowerCase();
                     if (txt.includes("veo") || txt.includes("video")) {
-                        return items[ii];
+                        items[ii].click();
+                        return true;
                     }
                 }
-                // If no text match, try last nth-child fallback
-                if (vi === 0) {
-                    var direct = sbRoot.querySelector(veoSelectors[0]);
-                    if (direct) return direct;
-                }
             }
+
+            // Last resort: try the exact nth-child(7) path directly
+            var direct = sbRoot.querySelector("div > form > div > div.actions-buttons.omnibar.multiline-input-actions-buttons > div.tools-button-container > md-menu > div:nth-child(7) > md-menu-item > div");
+            if (direct) { direct.click(); return true; }
         }
     }
-    return null;
+    return false;
 })();
 """
 
@@ -200,10 +200,14 @@ _JS_GET_PROMPT_INPUT = """
                 var editor = searchBar.shadowRoot.querySelector(editorSelectors[ei]);
                 if (!editor) continue;
                 if (editor.shadowRoot) {
-                    var p = editor.shadowRoot.querySelector("div > div > div > p") ||
-                            editor.shadowRoot.querySelector(".ProseMirror p") ||
-                            editor.shadowRoot.querySelector("[contenteditable='true']");
+                    // User's confirmed path: div > div > div > p
+                    var p = editor.shadowRoot.querySelector("div > div > div > p");
                     if (p) return p;
+                    // Fallback: look for ProseMirror contenteditable div
+                    var pm = editor.shadowRoot.querySelector(".ProseMirror");
+                    if (pm) return pm;
+                    var ce = editor.shadowRoot.querySelector("[contenteditable='true']");
+                    if (ce) return ce;
                 }
                 return editor;
             }

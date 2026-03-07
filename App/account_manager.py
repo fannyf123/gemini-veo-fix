@@ -670,9 +670,8 @@ class AccountManagerMixin:
         dismissed = False
         for dismiss_try in range(1, 4):
             try:
-                btn = driver.execute_script(_JS_DISMISS_POPUP)
-                if btn:
-                    driver.execute_script("arguments[0].click();", btn)
+                result = driver.execute_script(_JS_DISMISS_POPUP)
+                if result:
                     self._log("Popup 'I'll do this later' dismissed")
                     dismissed = True
                     break
@@ -691,9 +690,8 @@ class AccountManagerMixin:
         tools_clicked = False
         for tools_try in range(1, 4):
             try:
-                btn = driver.execute_script(_JS_CLICK_TOOLS)
-                if btn:
-                    driver.execute_script("arguments[0].click();", btn)
+                result = driver.execute_script(_JS_CLICK_TOOLS)
+                if result:
                     self._log("Tools button clicked")
                     tools_clicked = True
                     break
@@ -718,9 +716,8 @@ class AccountManagerMixin:
         veo_clicked = False
         for veo_try in range(1, 4):
             try:
-                menu_item = driver.execute_script(_JS_CLICK_VEO)
-                if menu_item:
-                    driver.execute_script("arguments[0].click();", menu_item)
+                result = driver.execute_script(_JS_CLICK_VEO)
+                if result:
                     self._log("Clicked 'Create videos with Veo'")
                     veo_clicked = True
                     break
@@ -750,9 +747,8 @@ class AccountManagerMixin:
             if veo_try < 3:
                 time.sleep(2)
                 try:
-                    btn = driver.execute_script(_JS_CLICK_TOOLS)
-                    if btn:
-                        driver.execute_script("arguments[0].click();", btn)
+                    result = driver.execute_script(_JS_CLICK_TOOLS)
+                    if result:
                         time.sleep(1.5)
                 except Exception:
                     pass
