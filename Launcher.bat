@@ -1,7 +1,7 @@
 @echo off
-setlocal EnableDelayedExpansion
-title 🎬 Gemini Veo Auto Generator
 chcp 65001 > nul
+setlocal EnableDelayedExpansion
+title Gemini Veo Auto Generator
 color 0A
 
 :: ============================================================
@@ -12,7 +12,7 @@ color 0A
 cls
 echo.
 echo  ╔══════════════════════════════════════════════════╗
-echo  ║        🎬  GEMINI VEO AUTO GENERATOR            ║
+echo  ║        GEMINI VEO AUTO GENERATOR               ║
 echo  ║        Automation Tool by ReenzAuto             ║
 echo  ╚══════════════════════════════════════════════════╝
 echo.
@@ -29,7 +29,7 @@ if errorlevel 1 (
     color 0C
     echo.
     echo  ╔══════════════════════════════════════════════════╗
-    echo  ║  ❌  PYTHON TIDAK DITEMUKAN!                    ║
+    echo  ║  [ERROR] PYTHON TIDAK DITEMUKAN!                ║
     echo  ╚══════════════════════════════════════════════════╝
     echo.
     echo  Python belum terinstall atau tidak ada di PATH.
@@ -46,7 +46,7 @@ if errorlevel 1 (
     exit /b 1
 )
 for /f "tokens=2" %%V in ('python --version 2^>^&1') do set PY_VER=%%V
-echo      ✅ Python %PY_VER% ditemukan.
+echo      [OK] Python %PY_VER% ditemukan.
 echo.
 
 :: ─── STEP 2: CEK / BUAT VIRTUAL ENVIRONMENT ─────────────
@@ -57,22 +57,22 @@ if not exist ".venv\Scripts\activate.bat" (
     if errorlevel 1 (
         color 0C
         echo.
-        echo  ❌ Gagal membuat Virtual Environment!
+        echo  [ERROR] Gagal membuat Virtual Environment!
         echo     Pastikan modul 'venv' tersedia.
         echo.
         pause
         exit /b 1
     )
-    echo      ✅ Virtual Environment berhasil dibuat.
+    echo      [OK] Virtual Environment berhasil dibuat.
 ) else (
-    echo      ✅ Virtual Environment sudah ada.
+    echo      [OK] Virtual Environment sudah ada.
 )
 echo.
 
 :: ─── STEP 3: AKTIFKAN VENV ───────────────────────────────
 echo  [3/6] Mengaktifkan Virtual Environment...
 call .venv\Scripts\activate.bat
-echo      ✅ Virtual Environment aktif.
+echo      [OK] Virtual Environment aktif.
 echo.
 
 :: ─── STEP 4: INSTALL / UPDATE DEPENDENCIES ───────────────
@@ -83,7 +83,7 @@ pip install -r requirements.txt --quiet --disable-pip-version-check
 if errorlevel 1 (
     color 0C
     echo.
-    echo  ❌ Gagal install dependencies!
+    echo  [ERROR] Gagal install dependencies!
     echo.
     echo  Kemungkinan penyebab:
     echo  - Tidak ada koneksi internet
@@ -95,7 +95,7 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo      ✅ Semua dependencies terinstall.
+echo      [OK] Semua dependencies terinstall.
 echo.
 
 :: ─── STEP 5: CEK CONFIG.JSON ─────────────────────────────
@@ -103,10 +103,10 @@ echo  [5/6] Memeriksa file konfigurasi...
 if not exist "config.json" (
     if exist "config.default.json" (
         copy "config.default.json" "config.json" > nul
-        echo      ⚙️  config.json dibuat dari template.
+        echo      [INFO] config.json dibuat dari template.
         echo.
         echo  ┌─────────────────────────────────────────────────┐
-        echo  │  📝 config.json baru dibuat!                   │
+        echo  │  config.json baru dibuat!                      │
         echo  │                                                 │
         echo  │  Kamu bisa edit pengaturan di config.json:     │
         echo  │   - delay  : jeda antar prompt (detik)         │
@@ -122,27 +122,27 @@ if not exist "config.json" (
             pause
         )
     ) else (
-        echo      ⚠️  config.default.json tidak ditemukan, skip.
+        echo      [WARN] config.default.json tidak ditemukan, skip.
     )
 ) else (
-    echo      ✅ config.json sudah ada.
+    echo      [OK] config.json sudah ada.
 )
 echo.
 
 :: ─── STEP 6: CEK PROMPTS.TXT ─────────────────────────────
 echo  [6/6] Memeriksa file prompts...
 if not exist "prompts.txt" (
-    echo      ⚠️  prompts.txt tidak ditemukan!
+    echo      [WARN] prompts.txt tidak ditemukan!
     echo      Membuat file prompts.txt contoh...
     (
         echo A golden sunset over a mountain lake with reflections
         echo A futuristic city at night with flying cars
         echo A close-up of a butterfly landing on a flower in slow motion
     ) > prompts.txt
-    echo      ✅ prompts.txt dibuat dengan 3 contoh prompt.
+    echo      [OK] prompts.txt dibuat dengan 3 contoh prompt.
     echo.
     echo  ┌─────────────────────────────────────────────────┐
-    echo  │  📝 Edit prompts.txt untuk menambah prompt     │
+    echo  │  Edit prompts.txt untuk menambah prompt        │
     echo  │     video kamu (satu prompt per baris)         │
     echo  └─────────────────────────────────────────────────┘
     echo.
@@ -154,15 +154,16 @@ if not exist "prompts.txt" (
         pause
     )
 ) else (
-    for /f %%C in ('find /c /v "" ^< prompts.txt') do set LINE_COUNT=%%C
-    echo      ✅ prompts.txt ditemukan (!LINE_COUNT! baris prompt).
+    set LINE_COUNT=0
+    for /f "usebackq" %%A in ("prompts.txt") do set /a LINE_COUNT+=1
+    echo      [OK] prompts.txt ditemukan (!LINE_COUNT! baris prompt).
 )
 echo.
 
 :: ─── SIAP JALAN ──────────────────────────────────────────
 echo  ────────────────────────────────────────────────────
 echo.
-echo  ✅ Semua setup selesai! Memulai aplikasi...
+echo  [OK] Semua setup selesai! Memulai aplikasi...
 echo.
 echo  ────────────────────────────────────────────────────
 echo.
@@ -175,7 +176,7 @@ if errorlevel 1 (
     color 0C
     echo.
     echo  ╔══════════════════════════════════════════════════╗
-    echo  ║  ❌  APLIKASI BERHENTI KARENA ERROR             ║
+    echo  ║  [ERROR] APLIKASI BERHENTI KARENA ERROR         ║
     echo  ╚══════════════════════════════════════════════════╝
     echo.
     echo  Cek folder DEBUG\ untuk screenshot error.
@@ -186,7 +187,7 @@ if errorlevel 1 (
 ) else (
     echo.
     echo  ╔══════════════════════════════════════════════════╗
-    echo  ║  ✅  Aplikasi selesai. Sampai jumpa!            ║
+    echo  ║  Aplikasi selesai. Sampai jumpa!               ║
     echo  ╚══════════════════════════════════════════════════╝
     echo.
     echo  Video tersimpan di folder: OUTPUT_GEMINI\
