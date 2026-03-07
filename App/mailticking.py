@@ -68,15 +68,15 @@ OTP_TEXT_COLORS = {
     "#185abc", "#174ea6", "#0d47a1",
 }
 
+# Polling: cek inbox setiap N detik (tidak perlu full refresh)
+_INBOX_POLL_INTERVAL   = 0.8   # detik antar cek DOM
+_INBOX_REFRESH_EVERY   = 6     # detik sebelum full page refresh
+_OTP_WAIT_AFTER_CLICK  = 0.8   # detik tunggu setelah klik email link
+
 # ── Exact CSS selectors dari JS path inspect element ─────────────────────────
-# Step 3: Centang checkbox abc@domain.com
 _SEL_TYPE4_CHECKBOX = "#type4"
-
-# Step 4a: Tombol Change email
-_SEL_CHANGE_BTN = "#modalChange"
-
-# Step 4b: Tombol Activate di dalam modal
-_SEL_ACTIVATE_BTN = (
+_SEL_CHANGE_BTN     = "#modalChange"
+_SEL_ACTIVATE_BTN   = (
     "#emailActivationModal > div > div "
     "> div.modal-footer.text-center > a"
 )
@@ -84,7 +84,6 @@ _SEL_ACTIVATE_BTN = (
 
 
 def _is_banned_email(email: str) -> bool:
-    """Return True jika email berformat @gmail.com atau @googlemail.com."""
     low = email.lower().strip()
     return any(low.endswith(d) for d in BANNED_DOMAINS)
 
@@ -95,11 +94,13 @@ def _extract_otp_from_html(html: str) -> Optional[str]:
     except Exception:
         return None
 
+    # 1. Exact class match
     for tag in soup.find_all("span", class_="verification-code"):
         text = re.sub(r'\s+', '', tag.get_text(strip=True))
         if re.fullmatch(r'[A-Z0-9]{4,8}', text, re.IGNORECASE):
             return text.upper()
 
+    # 2. Style-based heuristic
     def _n(s):
         return s.lower().replace(" ", "").strip()
 
@@ -110,7 +111,7 @@ def _extract_otp_from_html(html: str) -> Optional[str]:
         m = re.search(r'font-size:([\d.]+)(px|pt)', style)
         if m:
             val = float(m.group(1))
-            px  = val if m.group(2) == "px" else val * 1.333
+            px = val if m.group(2) == "px" else val * 1.333
             if px >= 20:
                 return True
         for c in OTP_TEXT_COLORS:
@@ -129,6 +130,7 @@ def _extract_otp_from_html(html: str) -> Optional[str]:
             if re.fullmatch(r'[A-Z0-9]{4,8}', text, re.IGNORECASE):
                 return text.upper()
 
+    # 3. Standalone block
     STANDALONE = ["td", "div", "span", "p", "b", "strong", "h1", "h2", "h3"]
     SKIP_WORDS = {
         "THIS", "THAT", "FROM", "WITH", "YOUR", "EMAIL", "ALIAS",
@@ -142,6 +144,7 @@ def _extract_otp_from_html(html: str) -> Optional[str]:
             if code not in SKIP_WORDS:
                 return code
 
+    # 4. Regex on plain text
     plain = soup.get_text(separator=" ")
     patterns = [
         r'(?:verification|one-time)\s+code[^A-Z0-9]{0,20}([A-Z0-9]{4,8})\b',
@@ -178,7 +181,6 @@ class MailtickingClient:
         driver.execute_script("arguments[0].click();", element)
 
     def _wait_page_ready(self, driver, timeout=30, label=""):
-        """Wait until document.readyState == 'complete'."""
         tag = f" [{label}]" if label else ""
         try:
             WebDriverWait(driver, timeout).until(
@@ -186,7 +188,7 @@ class MailtickingClient:
             )
         except TimeoutException:
             self._log(f"Page readyState timeout{tag} ({timeout}s)", "WARNING")
-        time.sleep(0.5)
+        time.sleep(0.3)
         self._log(f"Page ready{tag}")
 
     def _safe_click(self, driver, element):
@@ -195,7 +197,7 @@ class MailtickingClient:
                 if attempt == 1:
                     driver.execute_script(
                         "arguments[0].scrollIntoView({block:'center'});", element)
-                    time.sleep(0.3)
+                    time.sleep(0.2)
                 if attempt == 2:
                     self._js_click(driver, element)
                     return
@@ -204,9 +206,9 @@ class MailtickingClient:
             except (ElementClickInterceptedException,
                     ElementNotInteractableException,
                     StaleElementReferenceException):
-                time.sleep(0.3)
+                time.sleep(0.2)
 
-    def _wait_for_modal(self, driver, timeout: int = 15) -> bool:
+    def _wait_for_modal(self, driver, timeout: int = 12) -> bool:
         try:
             WebDriverWait(driver, timeout).until(
                 EC.presence_of_element_located(
@@ -216,7 +218,7 @@ class MailtickingClient:
         except TimeoutException:
             pass
         try:
-            WebDriverWait(driver, 5).until(
+            WebDriverWait(driver, 3).until(
                 EC.visibility_of_element_located(
                     (By.CSS_SELECTOR, ".modal.show, .modal.in, .modal[style*='display: block']"))
             )
@@ -229,52 +231,38 @@ class MailtickingClient:
     def open_mailticking_tab(self, driver) -> str:
         self._log("Opening mailticking.com...")
         driver.execute_script("window.open('about:blank', '_blank');")
-        time.sleep(0.5)
+        time.sleep(0.3)
         driver.switch_to.window(driver.window_handles[-1])
         driver.get(MAILTICKING_URL)
-        # FIX 3: Wait for full page load, not just body tag
         self._wait_page_ready(driver, timeout=30, label="mailticking.com")
         self._log("mailticking.com loaded.")
         return driver.current_window_handle
 
     # -------------------------------------------------------------------------
     def get_fresh_email(self, driver) -> str:
-        """
-        Urutan yang benar:
-          1. Centang HANYA #type4 (abc@domain.com)
-          2. Klik #modalChange 1 kali
-          3. Klik Activate (#emailActivationModal > ... > a)
-          4. Tunggu halaman reload -> baca email
-        """
         modal_found = self._wait_for_modal(driver, timeout=12)
         if modal_found:
             self._log("Modal 'Your Temp Email is Ready' detected.")
         else:
             self._log("Modal not detected, proceeding anyway...", "WARNING")
 
-        # Step 3: Centang HANYA #type4 dulu
         self._configure_checkboxes(driver)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
-        # Klik Change 1 kali
         email = self._click_change_once(driver)
         self._log(f"Email ready after change: {email}")
 
-        # Step 4b: Klik Activate
         self._click_activate(driver)
 
-        # Wait for page to fully reload
         self._log("Waiting for page to reload after Activate...")
         self._wait_page_ready(driver, timeout=30, label="Post-Activate")
 
-        # Baca email aktif dari navbar
         final_email = self._read_email_from_navbar(driver) or email
         self._log(f"Temp email obtained: {final_email}")
         return final_email
 
     # -------------------------------------------------------------------------
     def _read_email_from_modal(self, driver) -> str:
-        """Baca email yang sedang tampil di field modal (sebelum activate)."""
         for sel in [
             ".modal input[type='text']",
             ".modal input[type='email']",
@@ -304,11 +292,8 @@ class MailtickingClient:
         return ""
 
     def _click_change_once(self, driver) -> str:
-        """
-        Klik #modalChange tepat 1 kali.
-        """
         CHANGE_SELECTORS = [
-            _SEL_CHANGE_BTN,              # Priority 0: exact -> "#modalChange"
+            _SEL_CHANGE_BTN,
             "button#modalChange",
             "button.btn-info#modalChange",
         ]
@@ -342,7 +327,7 @@ class MailtickingClient:
 
         deadline = time.time() + 3
         while time.time() < deadline:
-            time.sleep(0.4)
+            time.sleep(0.3)
             new_email = self._read_email_from_modal(driver)
             if new_email and new_email != current_email:
                 return new_email
@@ -351,25 +336,17 @@ class MailtickingClient:
 
     # -------------------------------------------------------------------------
     def _configure_checkboxes(self, driver):
-        """
-        Centang HANYA #type4 (abc@domain.com), uncheck semua lainnya.
-
-        Priority 0: document.querySelector("#type4")  <- exact JS path
-        Fallback  : cari semua input[name='type'] dan match by id/value/label
-        """
-        # Priority 0: exact selector #type4
         try:
             cb = driver.find_element(By.CSS_SELECTOR, _SEL_TYPE4_CHECKBOX)
             if not cb.is_selected():
                 self._js_click(driver, cb)
-                time.sleep(0.2)
+                time.sleep(0.15)
                 self._log("Checked: abc@domain.com (#type4) via exact selector")
             else:
                 self._log("Already checked: abc@domain.com (#type4)")
         except Exception as e:
             self._log(f"#type4 not found via exact selector: {e}", "WARNING")
 
-        # Uncheck semua checkbox lain (type1, type2, type3, dst)
         try:
             checkboxes = driver.find_elements(
                 By.CSS_SELECTOR, "input[type='checkbox'][name='type']")
@@ -381,11 +358,10 @@ class MailtickingClient:
                 try:
                     cb_id = cb.get_attribute("id") or ""
                     if cb_id == "type4":
-                        continue  # sudah dihandle di atas
-
+                        continue
                     if cb.is_selected():
                         self._js_click(driver, cb)
-                        time.sleep(0.2)
+                        time.sleep(0.15)
                 except (StaleElementReferenceException, Exception):
                     continue
 
@@ -421,14 +397,6 @@ class MailtickingClient:
         return ""
 
     def _click_activate(self, driver):
-        """
-        Priority 0: document.querySelector(
-            "#emailActivationModal > div > div > div.modal-footer.text-center > a"
-        )  <- exact JS path dari inspect element
-
-        Fallback: a.activeBtn, a.btn-warning.activeBtn, text 'activat'
-        """
-        # Priority 0: exact path
         try:
             el = driver.find_element(By.CSS_SELECTOR, _SEL_ACTIVATE_BTN)
             self._js_click(driver, el)
@@ -437,7 +405,6 @@ class MailtickingClient:
         except Exception as e:
             self._log(f"Activate exact path not found: {e}", "WARNING")
 
-        # Fallback 1: class-based selectors
         for sel in [
             "a.activeBtn",
             "a.btn-warning.activeBtn",
@@ -453,7 +420,6 @@ class MailtickingClient:
             except Exception:
                 pass
 
-        # Fallback 2: text-based
         for tag in ["a", "button"]:
             for el in driver.find_elements(By.TAG_NAME, tag):
                 try:
@@ -517,43 +483,65 @@ class MailtickingClient:
         gemini_tab_handle: str,
         timeout:           int = 90,
     ) -> bool:
+        """
+        Fast polling: cek DOM setiap 0.8 detik.
+        Full page refresh hanya dilakukan setiap _INBOX_REFRESH_EVERY detik.
+        Tidak perlu wait_page_ready pada setiap loop.
+        """
         self._log("Checking inbox for verification email...")
         driver.switch_to.window(mail_tab_handle)
         self._log("Switched to mailticking.com tab")
 
-        start = time.time()
-        while time.time() - start < timeout:
-            try:
-                driver.refresh()
-                # FIX 3: Wait for full page load after refresh
-                self._wait_page_ready(driver, timeout=15, label="Inbox Refresh")
+        start            = time.time()
+        last_refresh_at  = start
+        log_counter      = 0
 
+        while time.time() - start < timeout:
+            elapsed = time.time() - start
+
+            # ── Full refresh setiap _INBOX_REFRESH_EVERY detik ──────────────
+            if elapsed > 0 and (time.time() - last_refresh_at) >= _INBOX_REFRESH_EVERY:
                 try:
-                    act_btns = driver.find_elements(
-                        By.CSS_SELECTOR,
-                        f"{_SEL_ACTIVATE_BTN}, a.activeBtn, .activeBtn"
+                    driver.refresh()
+                    # Cukup tunggu document.readyState saja, tanpa extra sleep
+                    WebDriverWait(driver, 10).until(
+                        lambda d: d.execute_script("return document.readyState") == "complete"
                     )
-                    for b in act_btns:
-                        if b.is_displayed():
-                            self._js_click(driver, b)
-                            time.sleep(0.5)
-                            break
+                    last_refresh_at = time.time()
+
+                    # Re-dismiss activate modal jika muncul lagi
+                    try:
+                        act_btns = driver.find_elements(
+                            By.CSS_SELECTOR,
+                            f"{_SEL_ACTIVATE_BTN}, a.activeBtn, .activeBtn"
+                        )
+                        for b in act_btns:
+                            if b.is_displayed():
+                                self._js_click(driver, b)
+                                time.sleep(0.3)
+                                break
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
+            # ── Cek DOM langsung tanpa refresh ──────────────────────────────
+            try:
                 row = self._find_gemini_row(driver)
                 if row:
-                    self._log("Verification email found!")
+                    self._log(f"Verification email found! ({elapsed:.1f}s)")
                     return True
-
             except Exception:
                 pass
 
-            elapsed = int(time.time() - start)
-            if elapsed > 0 and elapsed % 10 < 3:
-                self._log(f"Waiting for email... ({elapsed}s)")
-            time.sleep(1.5)
+            # Log setiap 6 detik
+            log_counter += 1
+            if log_counter % int(_INBOX_REFRESH_EVERY / _INBOX_POLL_INTERVAL) == 0:
+                self._log(f"Waiting for email... ({int(elapsed)}s elapsed)")
 
+            time.sleep(_INBOX_POLL_INTERVAL)
+
+        self._log(f"Email not received after {timeout}s", "WARNING")
         return False
 
     # -------------------------------------------------------------------------
@@ -562,34 +550,40 @@ class MailtickingClient:
         driver,
         mail_tab_handle: str,
     ) -> Optional[str]:
+        """
+        Fast extraction:
+        1. Cek span.verification-code di DOM dulu (tanpa klik, instan)
+        2. Klik link email -> langsung cek span lagi
+        3. Fallback ke HTML parse
+        """
         self._log("Extracting verification code from email...")
         driver.switch_to.window(mail_tab_handle)
 
+        # ── Cek span di halaman inbox dulu (instan) ──────────────────────────
+        otp = self._fast_extract_span(driver)
+        if otp:
+            self._log(f"OTP extracted instantly from inbox DOM: {otp}")
+            return otp
+
+        # ── Klik link email ──────────────────────────────────────────────────
         row = self._find_gemini_row(driver)
         if row:
             self._js_click(driver, row)
             self._log("Clicked 'Gemini Enterprise verification code' link")
-            try:
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located(
-                        (By.CSS_SELECTOR, "span.verification-code, .verification-code"))
-                )
-            except TimeoutException:
-                pass
-            time.sleep(random.uniform(2, 3))
+
+            # Poll span setiap 0.3 detik, max 8 detik
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                otp = self._fast_extract_span(driver)
+                if otp:
+                    self._log(f"OTP obtained (span poll): {otp}")
+                    return otp
+                time.sleep(0.3)
         else:
             self._log("Could not find Gemini email link", "WARNING")
-            time.sleep(2)
+            time.sleep(0.5)
 
-        try:
-            otp_el = driver.find_element(By.CSS_SELECTOR, "span.verification-code")
-            otp = otp_el.text.strip()
-            if re.fullmatch(r'[A-Z0-9]{4,8}', otp, re.IGNORECASE):
-                self._log(f"Verification code extracted (span.verification-code): {otp.upper()}")
-                return otp.upper()
-        except Exception:
-            pass
-
+        # ── Fallback: switch iframe lalu parse HTML ───────────────────────────
         html_content = ""
         try:
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
@@ -615,8 +609,44 @@ class MailtickingClient:
 
         otp = _extract_otp_from_html(html_content)
         if otp:
-            self._log(f"Verification code extracted: {otp}")
+            self._log(f"Verification code extracted (HTML parse): {otp}")
             return otp
 
         self._log("Could not extract verification code from email", "WARNING")
+        return None
+
+    # -------------------------------------------------------------------------
+    def _fast_extract_span(self, driver) -> Optional[str]:
+        """Cek span.verification-code langsung di DOM saat ini. Return OTP atau None."""
+        try:
+            # Cek di main document
+            els = driver.find_elements(By.CSS_SELECTOR, "span.verification-code, .verification-code")
+            for el in els:
+                try:
+                    text = el.text.strip()
+                    if re.fullmatch(r'[A-Z0-9]{4,8}', text, re.IGNORECASE):
+                        return text.upper()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Cek di dalam iframe (jika email ditampilkan dalam iframe)
+        try:
+            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            for iframe in iframes:
+                try:
+                    driver.switch_to.frame(iframe)
+                    els = driver.find_elements(By.CSS_SELECTOR, "span.verification-code, .verification-code")
+                    for el in els:
+                        text = el.text.strip()
+                        if re.fullmatch(r'[A-Z0-9]{4,8}', text, re.IGNORECASE):
+                            driver.switch_to.default_content()
+                            return text.upper()
+                    driver.switch_to.default_content()
+                except Exception:
+                    driver.switch_to.default_content()
+        except Exception:
+            pass
+
         return None
