@@ -1,166 +1,119 @@
-# 🎬 Gemini Veo Auto Generator
+# Gemini Veo Auto Generator
 
-Otomasi **generate video AI** menggunakan [Gemini Business (Veo)](https://business.gemini.google/) dengan akun temp email dari [mailticking.com](https://mailticking.com). Auto-switch akun saat rate limit.
-
----
-
-## 📁 Struktur Repo
-
-```
-gemini-veo-tester/
-├── App/
-│   ├── __init__.py
-│   ├── _stealth_compat.py       # Selenium stealth helper
-│   ├── gemini_enterprise.py     # Core: otomasi Gemini Business + Veo
-│   └── mailticking.py           # Core: temp email + OTP via mailticking.com
-├── Launcher.bat                 # Windows: jalankan app
-├── Launcher.sh                  # Linux/Mac: jalankan app
-├── main.py                      # Entry point GUI
-├── diagnose.py                  # Cek environment (Chrome, ChromeDriver, deps)
-├── prompts.txt                  # Daftar prompt video (1 prompt per baris)
-├── config.default.json          # Template konfigurasi
-├── requirements.txt             # Dependencies Python
-└── OUTPUT_GEMINI/               # Folder output video (dibuat otomatis)
-```
+Otomatis generate video AI menggunakan **Gemini Veo** (business.gemini.google) — cukup double-click, langsung jalan.
 
 ---
 
-## ⚙️ Requirements
+## Cara Pakai (Pemula)
 
-- **Python** 3.9+
-- **Google Chrome** (versi terbaru)
-- **ChromeDriver** (auto-download jika tidak ada)
-- Koneksi internet aktif
+### Langkah 1 — Download
 
-### Install dependencies:
-```bash
-pip install -r requirements.txt
+1. Klik tombol hijau **`< > Code`** di halaman ini
+2. Pilih **Download ZIP**
+3. Extract ZIP ke folder manapun (misal: `C:\GeminiVeo`)
+
+### Langkah 2 — Install Python (sekali saja)
+
+> Kalau sudah punya Python 3.9+, lewati langkah ini.
+
+1. Buka: https://www.python.org/downloads/
+2. Klik **Download Python** (versi terbaru)
+3. Jalankan installer
+4. ⚠️ **WAJIB centang** `Add Python to PATH` sebelum klik Install
+5. Selesai
+
+### Langkah 3 — Isi Prompt Video
+
+Buka file **`prompts.txt`** dengan Notepad, ketik prompt video kamu (satu prompt per baris).
+
+Contoh isi `prompts.txt`:
 ```
-
-`requirements.txt` berisi:
-```
-selenium
-selenium-stealth
-beautifulsoup4
-lxml
-```
-
----
-
-## 🚀 Cara Pakai
-
-### Windows
-```
-Double-click Launcher.bat
-```
-
-### Linux / Mac
-```bash
-bash Launcher.sh
-```
-
-### Manual
-```bash
-python main.py
-```
-
----
-
-## 📝 Setup Prompts
-
-Edit file `prompts.txt` — satu prompt per baris:
-```
-A golden sunset over a mountain lake with reflections
-A futuristic city at night with flying cars
+A golden sunset over a mountain lake with reflections in 4K
+A futuristic city at night with flying cars and neon lights
 A close-up of a butterfly landing on a flower in slow motion
 ```
 
+### Langkah 4 — Jalankan
+
+Double-click file **`Launcher.bat`**
+
+Launcher akan otomatis:
+- Install semua dependencies yang dibutuhkan
+- Buat config.json jika belum ada
+- Buat prompts.txt contoh jika belum ada
+- Menjalankan aplikasi GUI
+
+> Saat pertama kali jalan, proses install bisa memakan waktu 1-3 menit. Selanjutnya langsung jalan.
+
 ---
 
-## ⚙️ Konfigurasi
+## Struktur File
 
-Salin `config.default.json` → `config.json`, lalu edit:
-```json
-{
-  "delay": 5,
-  "retry": 1,
-  "headless": false
-}
+```
+GeminiVeo/
+|-- Launcher.bat         <- Double-click ini untuk mulai
+|-- gui.py               <- Antarmuka aplikasi (jangan diedit)
+|-- prompts.txt          <- Daftar prompt video kamu (edit ini)
+|-- config.json          <- Pengaturan (opsional)
+|-- requirements.txt     <- List dependencies Python (jangan diedit)
+|-- App/
+    |-- gemini_enterprise.py   <- Logika utama
+    |-- mailticking.py         <- Modul email temp
+    |-- js_constants.py        <- JS Shadow DOM selectors
+    |-- chrome_utils.py        <- Chrome/driver setup
+    |-- browser_helpers.py     <- Selenium helpers
+    |-- account_manager.py     <- Registrasi akun & OTP
+    |-- video_generator.py     <- Generate & download video
 ```
 
-| Key | Default | Keterangan |
+---
+
+## Pengaturan (config.json)
+
+Buka file `config.json` dengan Notepad untuk mengubah pengaturan:
+
+| Setting | Default | Keterangan |
 |---|---|---|
-| `delay` | `5` | Jeda (detik) antar prompt |
-| `retry` | `1` | Jumlah retry jika error |
-| `headless` | `false` | Jalankan tanpa tampilan browser |
+| `delay` | `5` | Jeda antar video (detik) |
+| `retry` | `2` | Berapa kali coba ulang jika gagal |
+| `headless` | `false` | `true` = browser tidak tampil |
+| `max_workers` | `1` | Jumlah akun paralel |
 
 ---
 
-## 🔄 Alur Otomasi (25 Step)
+## Hasil Video
 
+Semua video yang berhasil di-generate tersimpan di folder:
 ```
-Step 1  → Buka Chrome profil baru (temp profile)
-Step 2  → Buka mailticking.com - tunggu halaman load penuh
-Step 3  → Uncheck semua checkbox KECUALI id="type3" (abc@googlemail.com)
-Step 4  → Klik tombol Activate (a.activeBtn)
-Step 5  → Tunggu halaman reload → email aktif tersimpan
-Step 6  → Buka business.gemini.google di tab baru
-Step 7  → Input email ke input#email-input
-Step 8  → Klik 'Continue with email' (button#log-in-button)
-Step 9  → Tunggu halaman OTP load
-Step 10 → Kembali ke tab mailticking
-Step 11 → Reload halaman mailticking untuk cek inbox
-Step 12 → Klik link 'Gemini Enterprise verification code'
-          (a[href*='/mail/view/'] rel="nofollow")
-Step 13 → Tunggu & baca kode OTP dari span.verification-code
-Step 14 → Kembali ke tab Gemini - input OTP ke input.J6L5wc
-Step 15 → Klik tombol Verify (.YUhpIc-RLmnJb)
-Step 16 → Tunggu form nama - input ke input[formcontrolname="fullName"]
-Step 17 → Klik 'Agree & get started' (span.mdc-button__label)
-Step 18 → Tunggu h1.title 'Signing you in...' hilang
-Step 19 → Tutup popup awal (span.touch = "I'll do this later")
-Step 20 → Klik tools button (md-icon: page_info)
-Step 21 → Pilih 'Create videos with Veo' (div[slot='headline'])
-Step 22 → Input prompt ke div.ProseMirror editor
-Step 23 → Tekan Enter untuk generate
-Step 24 → Tunggu div.thinking-message hilang → tunggu video render
-Step 25 → Download video → simpan ke OUTPUT_GEMINI/
+OUTPUT_GEMINI\
 ```
 
-### Rate Limit Auto-Switch
-Jika `div.thinking-message` hilang dalam < 5 detik → terdeteksi **rate limit** → otomatis buat akun baru dan lanjut dari prompt yang gagal.
+---
+
+## Troubleshooting
+
+### Launcher error / tidak bisa jalan
+- Pastikan Python sudah terinstall dan ada di PATH
+- Klik kanan `Launcher.bat` → **Run as Administrator**
+- Pastikan antivirus tidak memblokir file `.bat`
+
+### Aplikasi berhenti dengan error
+- Cek folder `DEBUG\` untuk screenshot error
+- Jalankan diagnosa: buka CMD di folder ini, ketik `python diagnose.py`
+
+### Browser tidak ditemukan
+- Pastikan Google Chrome terinstall
+- Download di: https://www.google.com/chrome/
+
+### Video tidak ter-download
+- Pastikan tidak ada VPN yang memblokir Google
+- Coba set `headless: false` di config.json agar browser terlihat
 
 ---
 
-## 🔍 Diagnosa & Troubleshoot
+## Requirements
 
-Jalankan diagnose untuk cek environment:
-```bash
-python diagnose.py
-```
-
-Output screenshot debug tersimpan di folder `DEBUG/` secara otomatis saat error.
-
-### Masalah Umum
-
-| Masalah | Solusi |
-|---|---|
-| ChromeDriver tidak cocok | Jalankan `diagnose.py` — auto-download driver yang sesuai |
-| Email tidak masuk di mailticking | Tunggu lebih lama atau cek koneksi internet |
-| OTP tidak terbaca | Screenshot debug ada di folder `DEBUG/` |
-| Video tidak ter-download | Cek folder `OUTPUT_GEMINI/` — mungkin masih `.crdownload` |
-
----
-
-## 📌 Catatan Teknis
-
-- **OTP Input** (`input.J6L5wc`) menggunakan opacity:0 — script menggunakan JavaScript `dispatchEvent` agar Angular membaca nilai input
-- **ProseMirror editor** di-clear dengan `Ctrl+A → Delete` sebelum input prompt baru
-- **ChromeDriver** auto-download dari [Chrome for Testing API](https://googlechromelabs.github.io/chrome-for-testing/) jika versi tidak cocok
-- Semua file video output dinamai: `ReenzAuto_G-Business_{nomor}_{timestamp}.mp4`
-
----
-
-## 📄 License
-
-Private — for personal use only.
+- Windows 10/11 (64-bit)
+- Python 3.9 atau lebih baru
+- Google Chrome (terbaru)
+- Koneksi internet
