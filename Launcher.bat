@@ -30,7 +30,7 @@ echo.
 rem ---------------------------------------------------------------
 rem  STEP 1 : CEK PYTHON
 rem ---------------------------------------------------------------
-echo  [1/7] Memeriksa instalasi Python...
+echo  [1/6] Memeriksa instalasi Python...
 python --version >nul 2>&1
 if errorlevel 1 (
     color 0C
@@ -60,7 +60,7 @@ echo.
 rem ---------------------------------------------------------------
 rem  STEP 2 : CEK / BUAT VIRTUAL ENVIRONMENT
 rem ---------------------------------------------------------------
-echo  [2/7] Memeriksa Virtual Environment...
+echo  [2/6] Memeriksa Virtual Environment...
 if not exist ".venv\Scripts\activate.bat" (
     echo   Virtual Environment belum ada. Membuat baru...
     python -m venv .venv
@@ -82,7 +82,7 @@ echo.
 rem ---------------------------------------------------------------
 rem  STEP 3 : AKTIFKAN VENV
 rem ---------------------------------------------------------------
-echo  [3/7] Mengaktifkan Virtual Environment...
+echo  [3/6] Mengaktifkan Virtual Environment...
 call .venv\Scripts\activate.bat
 if errorlevel 1 (
     color 0C
@@ -99,7 +99,7 @@ echo.
 rem ---------------------------------------------------------------
 rem  STEP 4 : UPGRADE PIP
 rem ---------------------------------------------------------------
-echo  [4/7] Memperbarui pip...
+echo  [4/6] Memperbarui pip...
 python -m pip install --upgrade pip --quiet --disable-pip-version-check
 echo   [OK] pip siap.
 echo.
@@ -205,7 +205,7 @@ rem ---------------------------------------------------------------
 :step6
 rem  STEP 6 : CEK CONFIG.JSON
 rem ---------------------------------------------------------------
-echo  [6/7] Memeriksa file konfigurasi...
+echo  [6/6] Memeriksa file konfigurasi...
 if not exist "config.json" (
     if exist "config.default.json" (
         copy "config.default.json" "config.json" >nul
