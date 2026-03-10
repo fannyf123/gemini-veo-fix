@@ -27,38 +27,11 @@ OTP_TIMEOUT            = 90
 MAX_ACCOUNT_RETRY      = 3
 MAX_EMAIL_SUBMIT_RETRY = 5
 
-# Timeout menunggu Shadow DOM siap sebelum klik tools/Veo
-_SHADOW_DOM_READY_TIMEOUT = 30   # detik
-_SHADOW_DOM_POLL_INTERVAL = 0.8  # detik
-
-# JS: cek apakah ucs-search-bar shadowRoot sudah ready
-_JS_SHADOW_READY = """
-(function() {
-    var app = document.querySelector('body > ucs-standalone-app');
-    if (!app || !app.shadowRoot) return false;
-    var appRoot = app.shadowRoot;
-    var landingSelectors = [
-        'div > div.ucs-standalone-outer-row-container > div > main > ucs-chat-landing',
-        'div > div.ucs-standalone-outer-row-container > div > ucs-chat-landing',
-        'main > ucs-chat-landing',
-        'ucs-chat-landing'
-    ];
-    for (var li = 0; li < landingSelectors.length; li++) {
-        var landing = appRoot.querySelector(landingSelectors[li]);
-        if (!landing || !landing.shadowRoot) continue;
-        var sbSelectors = [
-            'div > div > div > div.fixed-content > ucs-search-bar',
-            'div > div > div > ucs-search-bar',
-            'ucs-search-bar'
-        ];
-        for (var si = 0; si < sbSelectors.length; si++) {
-            var sb = landing.shadowRoot.querySelector(sbSelectors[si]);
-            if (sb && sb.shadowRoot) return true;
-        }
-    }
-    return false;
-})();
-"""
+# URL prefix yang valid untuk halaman Gemini utama (bukan login/OTP)
+_GEMINI_MAIN_URL_PREFIXES = [
+    "https://business.gemini.google/app",
+    "https://business.gemini.google/",
+]
 
 # JS path exact untuk tombol "Sign up or sign in" di error page
 _JS_SIGN_IN_ERROR_BTN = (
@@ -300,6 +273,10 @@ class AccountManagerMixin:
         self._log("Signing in completed.")
         self._wait_page_ready(driver, timeout=20, label="Post-SignIn")
 
+        # ── [FIX] Pastikan driver ada di gemini_tab dan URL sudah benar ──────
+        self._log("Step 10: Ensuring driver is on correct Gemini tab...")
+        self._ensure_gemini_tab(driver, gemini_tab)
+
         self._log("Step 10: Initial setup (dismiss popup, click tools, select Veo)")
         setup_ok = False
         for setup_try in range(1, 4):
@@ -322,38 +299,80 @@ class AccountManagerMixin:
         return True
 
     # =========================================================================
-    # Helper: tunggu Shadow DOM (ucs-search-bar) siap
+    # Helper: pastikan driver ada di gemini_tab dan halaman Gemini sudah ready
     # =========================================================================
 
-    def _wait_shadow_dom_ready(self, driver, timeout: int = _SHADOW_DOM_READY_TIMEOUT) -> bool:
+    def _ensure_gemini_tab(self, driver, gemini_tab: str):
         """
-        Poll setiap _SHADOW_DOM_POLL_INTERVAL detik sampai ucs-search-bar
-        sudah punya shadowRoot (artinya Shadow DOM tree sudah fully rendered).
-        Return True jika ready, False jika timeout.
+        1. Switch ke gemini_tab
+        2. Cek URL sudah di business.gemini.google (bukan accounts.google / OTP page)
+        3. Jika URL masih di login/OTP, tunggu sampai redirect ke Gemini main page
+        4. Log URL saat ini untuk debug
         """
-        self._log(f"Waiting for Shadow DOM (ucs-search-bar) to be ready (max {timeout}s)...")
-        deadline = time.time() + timeout
-        attempt  = 0
-        while time.time() < deadline:
-            attempt += 1
-            try:
-                ready = driver.execute_script(_JS_SHADOW_READY)
-                if ready:
-                    elapsed = (attempt * _SHADOW_DOM_POLL_INTERVAL)
-                    self._log(f"Shadow DOM ready (attempt {attempt}, ~{elapsed:.1f}s)")
-                    return True
-            except Exception as e:
-                if attempt == 1:
-                    self._log(f"Shadow DOM check error: {e}", "WARNING")
-            if attempt % 5 == 0:
-                self._log(
-                    f"Shadow DOM not yet ready ({int(time.time()-deadline+timeout)}s elapsed), "
-                    f"still waiting..."
-                )
-            time.sleep(_SHADOW_DOM_POLL_INTERVAL)
+        try:
+            driver.switch_to.window(gemini_tab)
+            self._log(f"[TAB] Switched to gemini_tab: {gemini_tab}")
+        except Exception as e:
+            self._log(f"[TAB] Switch to gemini_tab failed: {e}", "WARNING")
+            # Fallback: coba cari tab yang URLnya Gemini
+            for handle in driver.window_handles:
+                try:
+                    driver.switch_to.window(handle)
+                    url = driver.current_url
+                    if "business.gemini.google" in url:
+                        self._log(f"[TAB] Found Gemini tab by URL scan: {url}")
+                        break
+                except Exception:
+                    pass
 
-        self._log(f"Shadow DOM NOT ready after {timeout}s!", "WARNING")
-        return False
+        # Log URL saat ini
+        try:
+            current_url = driver.current_url
+            self._log(f"[TAB] Current URL before setup: {current_url}")
+        except Exception:
+            current_url = ""
+
+        # Jika masih di accounts.google atau URL sign-in, tunggu redirect
+        if "accounts.google" in current_url or "business.gemini.google" not in current_url:
+            self._log("[TAB] URL not yet at Gemini main, waiting for redirect...", "WARNING")
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                try:
+                    url = driver.current_url
+                    if "business.gemini.google" in url and "accounts.google" not in url:
+                        self._log(f"[TAB] Redirected to Gemini: {url}")
+                        break
+                except Exception:
+                    pass
+                time.sleep(1)
+            else:
+                # Paksa navigate ke Gemini jika redirect tidak terjadi
+                self._log("[TAB] Redirect timeout, navigating to Gemini directly...", "WARNING")
+                try:
+                    driver.get(GEMINI_HOME_URL)
+                except Exception:
+                    pass
+
+        # Tunggu halaman Gemini benar-benar ready
+        self._wait_page_ready(driver, timeout=20, label="Gemini Main Page (pre-setup)")
+
+        # Tunggu ucs-standalone-app muncul di DOM
+        self._log("[TAB] Waiting for ucs-standalone-app to appear...")
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            try:
+                el = driver.execute_script(
+                    "return document.querySelector('body > ucs-standalone-app');"
+                )
+                if el:
+                    self._log("[TAB] ucs-standalone-app found in DOM")
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        else:
+            self._log("[TAB] ucs-standalone-app NOT found after 20s!", "WARNING")
+            self._debug_dump(driver, "no_ucs_app")
 
     # =========================================================================
     # Helper: baca email yang ditampilkan Gemini di OTP page
@@ -823,6 +842,12 @@ class AccountManagerMixin:
     # =========================================================================
 
     def _initial_setup(self, driver):
+        # Log URL dan tab aktif sebelum mulai
+        try:
+            self._log(f"[SETUP] Active tab: {driver.current_window_handle}, URL: {driver.current_url}")
+        except Exception:
+            pass
+
         self._log("Step 16: Closing 'I'll do this later' popup...")
         dismissed = False
         for dismiss_try in range(1, 4):
@@ -843,25 +868,6 @@ class AccountManagerMixin:
             self._log("No 'do this later' popup found, proceeding...", "WARNING")
         self._wait_page_ready(driver, timeout=15, label="Post-Dismiss Popup")
 
-        # ── [FIX] Tunggu Shadow DOM siap sebelum klik tools ──────────────────
-        self._log("Step 17: Waiting for Shadow DOM to be ready before clicking tools...")
-        shadow_ready = self._wait_shadow_dom_ready(driver, timeout=_SHADOW_DOM_READY_TIMEOUT)
-        if not shadow_ready:
-            self._log(
-                "Shadow DOM not ready after timeout! Trying to click tools anyway...",
-                "WARNING"
-            )
-            # Debug: list semua button yang terdeteksi di seluruh shadow roots
-            try:
-                btns_json = driver.execute_script(_JS_LIST_BUTTONS)
-                self._log(f"[SHADOW DEBUG] Buttons found in DOM: {btns_json[:500] if btns_json else 'none'}")
-            except Exception:
-                pass
-            self._debug_dump(driver, "shadow_dom_not_ready")
-        else:
-            # Tunggu sedikit extra agar animasi/transisi selesai setelah shadowRoot ready
-            time.sleep(1)
-
         self._log("Step 17: Clicking tools button...")
         tools_clicked = False
         for tools_try in range(1, 6):
@@ -872,38 +878,27 @@ class AccountManagerMixin:
                     tools_clicked = True
                     break
                 else:
-                    # JS dieksekusi tanpa error tapi return false/null
-                    # → Shadow DOM tree mungkin berubah, dump debug info
                     self._log(
-                        f"Tools button JS returned falsy (attempt {tools_try}/5), "
-                        "Shadow DOM might still be loading...",
+                        f"Tools button JS returned falsy (attempt {tools_try}/5)",
                         "WARNING"
                     )
+                    # Debug: list semua button di seluruh DOM
                     try:
-                        btns_json = driver.execute_script(_JS_LIST_BUTTONS)
-                        self._log(
-                            f"[SHADOW DEBUG attempt {tools_try}] "
-                            f"Buttons: {btns_json[:800] if btns_json else 'none'}"
-                        )
+                        btns = driver.execute_script(_JS_LIST_BUTTONS)
+                        self._log(f"[DEBUG] Buttons in DOM: {(btns or 'none')[:500]}")
                     except Exception:
                         pass
-                    if tools_try == 1:
-                        self._debug_dump(driver, "tools_btn_js_false")
             except Exception as e:
                 self._log(f"Tools button attempt {tools_try}/5 exception: {e}", "WARNING")
 
             if not tools_clicked and tools_try < 5:
-                # Re-poll Shadow DOM sebelum retry berikutnya
-                self._log(f"Re-waiting Shadow DOM before tools retry {tools_try + 1}...")
-                self._wait_shadow_dom_ready(driver, timeout=8)
-                time.sleep(1)
+                time.sleep(3)
 
         if not tools_clicked:
             self._log("Tools button not found after retries", "WARNING")
             self._debug_dump(driver, "tools_btn_not_found")
             return
 
-        # Tunggu menu tools terbuka (animasi)
         time.sleep(2)
 
         self._log("Step 18: Selecting 'Create videos with Veo'...")
@@ -916,10 +911,7 @@ class AccountManagerMixin:
                     veo_clicked = True
                     break
                 else:
-                    self._log(
-                        f"Veo JS returned falsy (attempt {veo_try}/5)",
-                        "WARNING"
-                    )
+                    self._log(f"Veo JS returned falsy (attempt {veo_try}/5)", "WARNING")
             except Exception as e:
                 self._log(f"Veo menu attempt {veo_try}/5: {e}", "WARNING")
 
@@ -945,7 +937,6 @@ class AccountManagerMixin:
                 break
             if veo_try < 5:
                 time.sleep(2)
-                # Re-open tools menu jika sudah tertutup
                 try:
                     result = driver.execute_script(_JS_CLICK_TOOLS)
                     if result:
@@ -960,31 +951,3 @@ class AccountManagerMixin:
 
         self._wait_page_ready(driver, timeout=15, label="Post-Veo Selection")
         self._log("Initial setup completed!")
-
-    # =========================================================================
-    # Helper: tunggu Shadow DOM ready khusus tools
-    # =========================================================================
-
-    def _wait_shadow_dom_ready(self, driver, timeout: int = _SHADOW_DOM_READY_TIMEOUT) -> bool:
-        self._log(f"Waiting for Shadow DOM (ucs-search-bar) to be ready (max {timeout}s)...")
-        deadline = time.time() + timeout
-        attempt  = 0
-        while time.time() < deadline:
-            attempt += 1
-            try:
-                ready = driver.execute_script(_JS_SHADOW_READY)
-                if ready:
-                    elapsed = attempt * _SHADOW_DOM_POLL_INTERVAL
-                    self._log(f"Shadow DOM ready (attempt {attempt}, ~{elapsed:.1f}s)")
-                    return True
-            except Exception as e:
-                if attempt == 1:
-                    self._log(f"Shadow DOM check error: {e}", "WARNING")
-            if attempt % 5 == 0:
-                self._log(
-                    f"Shadow DOM not yet ready "
-                    f"({int(time.time() - deadline + timeout)}s elapsed), still waiting..."
-                )
-            time.sleep(_SHADOW_DOM_POLL_INTERVAL)
-        self._log(f"Shadow DOM NOT ready after {timeout}s!", "WARNING")
-        return False
