@@ -68,10 +68,14 @@ OTP_TEXT_COLORS = {
     "#185abc", "#174ea6", "#0d47a1",
 }
 
-# Polling: cek inbox setiap N detik (tidak perlu full refresh)
-_INBOX_POLL_INTERVAL   = 0.8   # detik antar cek DOM
-_INBOX_REFRESH_EVERY   = 6     # detik sebelum full page refresh
-_OTP_WAIT_AFTER_CLICK  = 0.8   # detik tunggu setelah klik email link
+# Polling: cek inbox setiap N detik
+_INBOX_POLL_INTERVAL      = 0.8   # detik antar cek DOM
+_INBOX_REFRESH_EVERY      = 6     # detik sebelum full page refresh
+_OTP_WAIT_AFTER_CLICK     = 0.8
+
+# Polling untuk tunggu email baru selesai di-generate setelah Activate
+_EMAIL_GENERATE_POLL      = 0.5   # cek setiap 0.5 detik
+_EMAIL_GENERATE_TIMEOUT   = 30    # max tunggu 30 detik
 
 # ── Exact CSS selectors dari JS path inspect element ─────────────────────────
 _SEL_TYPE4_CHECKBOX = "#type4"
@@ -240,6 +244,18 @@ class MailtickingClient:
 
     # -------------------------------------------------------------------------
     def get_fresh_email(self, driver) -> str:
+        """
+        Flow:
+          1. Tunggu modal muncul
+          2. Centang hanya #type4
+          3. Klik Change (generate email baru)
+          4. Klik Activate
+          5. Tunggu halaman reload (readyState)
+          6. [FIX] Poll sampai email BARU benar-benar muncul di navbar
+             - email harus valid (ada @), bukan banned domain
+             - berbeda dari email sebelum Change (kalau ada)
+          7. Return email yang sudah dikonfirmasi
+        """
         modal_found = self._wait_for_modal(driver, timeout=12)
         if modal_found:
             self._log("Modal 'Your Temp Email is Ready' detected.")
@@ -249,17 +265,103 @@ class MailtickingClient:
         self._configure_checkboxes(driver)
         time.sleep(0.3)
 
-        email = self._click_change_once(driver)
-        self._log(f"Email ready after change: {email}")
+        # Simpan email sebelum Change sebagai referensi
+        email_before_change = self._read_email_from_modal(driver)
+        self._log(f"Email before Change: '{email_before_change}'")
+
+        email_after_change = self._click_change_once(driver)
+        self._log(f"Email after Change (modal): '{email_after_change}'")
 
         self._click_activate(driver)
+        self._log("Activate clicked. Waiting for page reload and email generation...")
 
-        self._log("Waiting for page to reload after Activate...")
-        self._wait_page_ready(driver, timeout=30, label="Post-Activate")
+        # ── Step 5: Tunggu readyState complete ───────────────────────────────
+        # Gunakan WebDriverWait langsung, tanpa _wait_page_ready agar lebih cepat
+        try:
+            WebDriverWait(driver, 20).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+        except TimeoutException:
+            self._log("readyState timeout after Activate", "WARNING")
+        time.sleep(0.5)  # beri jeda kecil untuk JS post-load selesai
 
-        final_email = self._read_email_from_navbar(driver) or email
-        self._log(f"Temp email obtained: {final_email}")
-        return final_email
+        # ── Step 6: Poll sampai email BARU muncul di navbar ──────────────────
+        # Email dianggap valid jika:
+        #   a. Ada karakter '@'
+        #   b. Bukan banned domain (@gmail.com, @googlemail.com)
+        #   c. Berbeda dari email_before_change (opsional tapi diutamakan)
+        confirmed_email = ""
+        deadline = time.time() + _EMAIL_GENERATE_TIMEOUT
+        attempt  = 0
+
+        while time.time() < deadline:
+            attempt += 1
+
+            # Baca email dari navbar (sumber paling akurat setelah Activate)
+            candidate = self._read_email_from_navbar(driver)
+
+            # Fallback: coba baca dari selectors lain
+            if not candidate or "@" not in candidate:
+                candidate = self._read_email_from_modal(driver)
+
+            # Fallback: scan page source
+            if not candidate or "@" not in candidate:
+                try:
+                    src = driver.page_source
+                    m = re.search(
+                        r'([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})',
+                        src
+                    )
+                    if m:
+                        raw = m.group(1)
+                        # Jangan ambil email google internal
+                        if not any(d in raw.lower() for d in [
+                            "google.com", "googleapis", "example.com", "mailticking.com"
+                        ]):
+                            candidate = raw
+                except Exception:
+                    pass
+
+            if candidate and "@" in candidate and not _is_banned_email(candidate):
+                # Email valid!
+                if email_before_change and candidate.lower() == email_before_change.lower():
+                    # Email belum berubah dari sebelum Change — tunggu lagi
+                    if attempt % 4 == 0:
+                        self._log(
+                            f"Email still same as before-change: '{candidate}', "
+                            f"waiting for new one... ({int(time.time()-deadline+_EMAIL_GENERATE_TIMEOUT)}s)"
+                        )
+                else:
+                    confirmed_email = candidate
+                    self._log(
+                        f"New email confirmed after Activate: '{confirmed_email}' "
+                        f"(attempt {attempt}, {attempt * _EMAIL_GENERATE_POLL:.1f}s)"
+                    )
+                    break
+            else:
+                if attempt % 4 == 0:
+                    self._log(
+                        f"Waiting for valid email to generate... "
+                        f"(got: '{candidate}', attempt {attempt})"
+                    )
+
+            time.sleep(_EMAIL_GENERATE_POLL)
+
+        if not confirmed_email:
+            # Timeout: ambil apapun yang ada, log warning
+            confirmed_email = (
+                self._read_email_from_navbar(driver)
+                or self._read_email_from_modal(driver)
+                or email_after_change
+                or email_before_change
+            )
+            self._log(
+                f"Email generation polling timeout! Using best-effort: '{confirmed_email}'",
+                "WARNING"
+            )
+
+        self._log(f"[FINAL] Temp email ready: '{confirmed_email}'")
+        return confirmed_email
 
     # -------------------------------------------------------------------------
     def _read_email_from_modal(self, driver) -> str:
@@ -486,24 +588,22 @@ class MailtickingClient:
         """
         Fast polling: cek DOM setiap 0.8 detik.
         Full page refresh hanya dilakukan setiap _INBOX_REFRESH_EVERY detik.
-        Tidak perlu wait_page_ready pada setiap loop.
         """
         self._log("Checking inbox for verification email...")
         driver.switch_to.window(mail_tab_handle)
         self._log("Switched to mailticking.com tab")
 
-        start            = time.time()
-        last_refresh_at  = start
-        log_counter      = 0
+        start           = time.time()
+        last_refresh_at = start
+        log_counter     = 0
 
         while time.time() - start < timeout:
             elapsed = time.time() - start
 
-            # ── Full refresh setiap _INBOX_REFRESH_EVERY detik ──────────────
+            # ── Full refresh setiap _INBOX_REFRESH_EVERY detik ────────────────
             if elapsed > 0 and (time.time() - last_refresh_at) >= _INBOX_REFRESH_EVERY:
                 try:
                     driver.refresh()
-                    # Cukup tunggu document.readyState saja, tanpa extra sleep
                     WebDriverWait(driver, 10).until(
                         lambda d: d.execute_script("return document.readyState") == "complete"
                     )
@@ -525,7 +625,7 @@ class MailtickingClient:
                 except Exception:
                     pass
 
-            # ── Cek DOM langsung tanpa refresh ──────────────────────────────
+            # ── Cek DOM langsung tanpa refresh ────────────────────────────────
             try:
                 row = self._find_gemini_row(driver)
                 if row:
@@ -534,7 +634,6 @@ class MailtickingClient:
             except Exception:
                 pass
 
-            # Log setiap 6 detik
             log_counter += 1
             if log_counter % int(_INBOX_REFRESH_EVERY / _INBOX_POLL_INTERVAL) == 0:
                 self._log(f"Waiting for email... ({int(elapsed)}s elapsed)")
@@ -552,26 +651,23 @@ class MailtickingClient:
     ) -> Optional[str]:
         """
         Fast extraction:
-        1. Cek span.verification-code di DOM dulu (tanpa klik, instan)
-        2. Klik link email -> langsung cek span lagi
+        1. Cek span.verification-code di DOM dulu (instan)
+        2. Klik link email -> poll span
         3. Fallback ke HTML parse
         """
         self._log("Extracting verification code from email...")
         driver.switch_to.window(mail_tab_handle)
 
-        # ── Cek span di halaman inbox dulu (instan) ──────────────────────────
         otp = self._fast_extract_span(driver)
         if otp:
             self._log(f"OTP extracted instantly from inbox DOM: {otp}")
             return otp
 
-        # ── Klik link email ──────────────────────────────────────────────────
         row = self._find_gemini_row(driver)
         if row:
             self._js_click(driver, row)
             self._log("Clicked 'Gemini Enterprise verification code' link")
 
-            # Poll span setiap 0.3 detik, max 8 detik
             deadline = time.time() + 8
             while time.time() < deadline:
                 otp = self._fast_extract_span(driver)
@@ -583,7 +679,6 @@ class MailtickingClient:
             self._log("Could not find Gemini email link", "WARNING")
             time.sleep(0.5)
 
-        # ── Fallback: switch iframe lalu parse HTML ───────────────────────────
         html_content = ""
         try:
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
@@ -617,9 +712,8 @@ class MailtickingClient:
 
     # -------------------------------------------------------------------------
     def _fast_extract_span(self, driver) -> Optional[str]:
-        """Cek span.verification-code langsung di DOM saat ini. Return OTP atau None."""
+        """Cek span.verification-code langsung di DOM. Return OTP atau None."""
         try:
-            # Cek di main document
             els = driver.find_elements(By.CSS_SELECTOR, "span.verification-code, .verification-code")
             for el in els:
                 try:
@@ -631,7 +725,6 @@ class MailtickingClient:
         except Exception:
             pass
 
-        # Cek di dalam iframe (jika email ditampilkan dalam iframe)
         try:
             iframes = driver.find_elements(By.TAG_NAME, "iframe")
             for iframe in iframes:
