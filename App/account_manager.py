@@ -19,12 +19,46 @@ from App.js_constants import (
     _JS_DISMISS_POPUP,
     _JS_CLICK_TOOLS,
     _JS_CLICK_VEO,
+    _JS_LIST_BUTTONS,
 )
 
 GEMINI_HOME_URL        = "https://business.gemini.google/"
 OTP_TIMEOUT            = 90
 MAX_ACCOUNT_RETRY      = 3
 MAX_EMAIL_SUBMIT_RETRY = 5
+
+# Timeout menunggu Shadow DOM siap sebelum klik tools/Veo
+_SHADOW_DOM_READY_TIMEOUT = 30   # detik
+_SHADOW_DOM_POLL_INTERVAL = 0.8  # detik
+
+# JS: cek apakah ucs-search-bar shadowRoot sudah ready
+_JS_SHADOW_READY = """
+(function() {
+    var app = document.querySelector('body > ucs-standalone-app');
+    if (!app || !app.shadowRoot) return false;
+    var appRoot = app.shadowRoot;
+    var landingSelectors = [
+        'div > div.ucs-standalone-outer-row-container > div > main > ucs-chat-landing',
+        'div > div.ucs-standalone-outer-row-container > div > ucs-chat-landing',
+        'main > ucs-chat-landing',
+        'ucs-chat-landing'
+    ];
+    for (var li = 0; li < landingSelectors.length; li++) {
+        var landing = appRoot.querySelector(landingSelectors[li]);
+        if (!landing || !landing.shadowRoot) continue;
+        var sbSelectors = [
+            'div > div > div > div.fixed-content > ucs-search-bar',
+            'div > div > div > ucs-search-bar',
+            'ucs-search-bar'
+        ];
+        for (var si = 0; si < sbSelectors.length; si++) {
+            var sb = landing.shadowRoot.querySelector(sbSelectors[si]);
+            if (sb && sb.shadowRoot) return true;
+        }
+    }
+    return false;
+})();
+"""
 
 # JS path exact untuk tombol "Sign up or sign in" di error page
 _JS_SIGN_IN_ERROR_BTN = (
@@ -97,17 +131,12 @@ class AccountManagerMixin:
             return False
         self._log(f"Temp email obtained: {email}")
 
-        # ── KUNCI FIX: simpan email aktif sebagai state bersama ──────────────────
-        # Ini adalah single source of truth selama satu sesi registrasi.
-        # Semua fungsi harus merujuk ke variabel ini, bukan re-read dari DOM.
         active_email = email
         self._log(f"[EMAIL STATE] active_email locked: {active_email}")
 
         self._log("Step 4: Kembali ke Gemini, input email, crosscheck, dan lanjut")
         driver.switch_to.window(gemini_tab)
 
-        # Pass active_email — jika terjadi recovery, _step_4_submit_email
-        # akan memakai email yang sama, tidak re-fetch dari mailticking
         submitted, active_email = self._step_4_submit_email(
             driver, active_email, mail_tab=mail_tab
         )
@@ -124,7 +153,6 @@ class AccountManagerMixin:
             return False
         self._log("OTP page loaded and 'Code sent' verified.")
 
-        # ── Verifikasi email di Gemini OTP page vs active_email ─────────────────
         gemini_otp_email = self._read_email_from_gemini_otp_page(driver)
         if gemini_otp_email:
             self._log(f"[EMAIL STATE] Gemini OTP page shows email: {gemini_otp_email}")
@@ -141,7 +169,6 @@ class AccountManagerMixin:
         self._log("Step 6: Kembali ke mailticking, cek inbox")
         driver.switch_to.window(mail_tab)
 
-        # ── Verifikasi email aktif di mailticking sama dengan active_email ───────
         mail_current_email = self._mail_client._read_email_from_navbar(driver)
         if not mail_current_email:
             mail_current_email = self._mail_client._read_email_from_modal(driver)
@@ -152,7 +179,6 @@ class AccountManagerMixin:
                 f"but active_email is '{active_email}'. Re-syncing mailticking...",
                 "WARNING"
             )
-            # Coba paksa mailticking pindah ke active_email via URL langsung
             resynced = self._resync_mailticking_email(driver, active_email)
             if not resynced:
                 self._log(
@@ -160,8 +186,6 @@ class AccountManagerMixin:
                     "Using mailticking's current email as active_email instead.",
                     "WARNING"
                 )
-                # Fallback: pakai email yang ada di mailticking sebagai patokan
-                # HANYA jika Gemini OTP page tidak bisa dikonfirmasi
                 if not gemini_otp_email:
                     active_email = mail_current_email
                     self._log(f"[EMAIL STATE] active_email updated to mailticking email: {active_email}")
@@ -298,34 +322,58 @@ class AccountManagerMixin:
         return True
 
     # =========================================================================
+    # Helper: tunggu Shadow DOM (ucs-search-bar) siap
+    # =========================================================================
+
+    def _wait_shadow_dom_ready(self, driver, timeout: int = _SHADOW_DOM_READY_TIMEOUT) -> bool:
+        """
+        Poll setiap _SHADOW_DOM_POLL_INTERVAL detik sampai ucs-search-bar
+        sudah punya shadowRoot (artinya Shadow DOM tree sudah fully rendered).
+        Return True jika ready, False jika timeout.
+        """
+        self._log(f"Waiting for Shadow DOM (ucs-search-bar) to be ready (max {timeout}s)...")
+        deadline = time.time() + timeout
+        attempt  = 0
+        while time.time() < deadline:
+            attempt += 1
+            try:
+                ready = driver.execute_script(_JS_SHADOW_READY)
+                if ready:
+                    elapsed = (attempt * _SHADOW_DOM_POLL_INTERVAL)
+                    self._log(f"Shadow DOM ready (attempt {attempt}, ~{elapsed:.1f}s)")
+                    return True
+            except Exception as e:
+                if attempt == 1:
+                    self._log(f"Shadow DOM check error: {e}", "WARNING")
+            if attempt % 5 == 0:
+                self._log(
+                    f"Shadow DOM not yet ready ({int(time.time()-deadline+timeout)}s elapsed), "
+                    f"still waiting..."
+                )
+            time.sleep(_SHADOW_DOM_POLL_INTERVAL)
+
+        self._log(f"Shadow DOM NOT ready after {timeout}s!", "WARNING")
+        return False
+
+    # =========================================================================
     # Helper: baca email yang ditampilkan Gemini di OTP page
     # =========================================================================
 
     def _read_email_from_gemini_otp_page(self, driver) -> str:
-        """
-        Baca email yang ditampilkan Gemini di OTP/verification page.
-        Gemini biasanya menampilkan "Code sent to user@domain.com" atau
-        menampilkan email di elemen tertentu.
-        Return email string atau "".
-        """
         try:
             src = driver.page_source
-            # Pattern 1: "Code sent to email@domain.com"
             m = re.search(
                 r'(?:code sent to|sent to|verify)\s+([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})',
                 src, re.IGNORECASE
             )
             if m:
                 return m.group(1).strip()
-
-            # Pattern 2: email muncul di dalam teks biasa
             m = re.search(
                 r'([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})',
                 src
             )
             if m:
                 candidate = m.group(1)
-                # Filter agar tidak ambil email google/internal
                 if not any(d in candidate.lower() for d in [
                     "google.com", "googleapis", "example.com", "noreply"
                 ]):
@@ -339,14 +387,6 @@ class AccountManagerMixin:
     # =========================================================================
 
     def _resync_mailticking_email(self, driver, target_email: str) -> bool:
-        """
-        Coba paksa mailticking untuk menampilkan inbox dari target_email.
-        Mailticking tidak support deep-link per email, jadi cara terbaik:
-        1. Refresh tab mailticking
-        2. Baca email yang aktif
-        3. Jika masih berbeda, lakukan get_fresh_email ulang (Change)
-        Return True jika berhasil sync atau email sudah sama.
-        """
         self._log(f"Trying to re-sync mailticking to: {target_email}")
         try:
             driver.refresh()
@@ -361,11 +401,10 @@ class AccountManagerMixin:
         return False
 
     # =========================================================================
-    # Helper: deteksi dan tangani error page "Let's try something else"
+    # Helper: deteksi dan tangani error page
     # =========================================================================
 
     def _is_lets_try_error_page(self, driver) -> bool:
-        """Return True jika halaman menampilkan error 'Let's try something else'."""
         try:
             src = driver.page_source.lower()
             return any(k in src for k in _ERROR_PAGE_INDICATORS)
@@ -373,11 +412,6 @@ class AccountManagerMixin:
             return False
 
     def _handle_lets_try_something_else(self, driver) -> bool:
-        """
-        Deteksi error page "Let's try something else".
-        Klik tombol 'Sign up or sign in', tunggu kembali ke halaman email input.
-        Return True jika berhasil kembali ke email input page.
-        """
         self._log(
             "[!] 'Let's try something else' page detected! "
             "Clicking 'Sign up or sign in'...",
@@ -386,8 +420,6 @@ class AccountManagerMixin:
         self._debug_dump(driver, "lets_try_error_page")
 
         clicked = False
-
-        # Priority 1: exact JS path dari inspect element
         try:
             btn = driver.execute_script(_JS_SIGN_IN_ERROR_BTN)
             if btn and btn.is_displayed():
@@ -397,7 +429,6 @@ class AccountManagerMixin:
         except Exception as e:
             self._log(f"Exact JS path click error: {e}", "WARNING")
 
-        # Priority 2: cari tombol/link berdasarkan text
         if not clicked:
             for tag in ["button", "a", "span"]:
                 try:
@@ -414,7 +445,6 @@ class AccountManagerMixin:
                 if clicked:
                     break
 
-        # Priority 3: span class AeBiU-vQzf8d
         if not clicked:
             try:
                 spans = driver.find_elements(By.CSS_SELECTOR, "span.AeBiU-vQzf8d")
@@ -438,7 +468,6 @@ class AccountManagerMixin:
             except Exception:
                 pass
 
-        # Tunggu halaman kembali ke email input
         self._log("Waiting for email input page to load...")
         try:
             WebDriverWait(driver, 20).until(
@@ -454,7 +483,6 @@ class AccountManagerMixin:
 
         self._wait_page_ready(driver, timeout=20, label="Post-ErrorPage Recovery")
 
-        # Verifikasi email input sudah ada
         email_el_present = False
         for check in range(8):
             try:
@@ -478,22 +506,15 @@ class AccountManagerMixin:
         return True
 
     # =========================================================================
-    # Step 4: Submit email + handle error page
-    # Returns (success: bool, active_email: str)
+    # Step 4: Submit email
     # =========================================================================
 
     def _step_4_submit_email(self, driver, email: str, mail_tab: str = ""):
-        """
-        Submit email ke Gemini. Return tuple (success, active_email).
-        active_email bisa berbeda dari input email jika terjadi recovery
-        yang memerlukan email baru dari mailticking.
-        """
         active_email = email
 
         for attempt in range(1, MAX_EMAIL_SUBMIT_RETRY + 1):
             self._log(f"Submit email attempt {attempt}/{MAX_EMAIL_SUBMIT_RETRY} (email: {active_email})")
 
-            # ── Cek dulu apakah kita di error page ──────────────────────────
             if self._is_lets_try_error_page(driver):
                 recovered = self._handle_lets_try_something_else(driver)
                 if not recovered:
@@ -502,7 +523,6 @@ class AccountManagerMixin:
                 time.sleep(1)
                 continue
 
-            # ── Cari email input ─────────────────────────────────────────────
             email_el = None
             try:
                 email_el = driver.execute_script('return document.querySelector("#email-input");')
@@ -521,7 +541,6 @@ class AccountManagerMixin:
                 self._wait_page_ready(driver, timeout=30, extra_selector="#email-input")
                 continue
 
-            # ── Clear field sebelum typing untuk hindari sisa nilai lama ────
             try:
                 driver.execute_script("arguments[0].value = '';", email_el)
                 email_el.click()
@@ -543,7 +562,6 @@ class AccountManagerMixin:
                     f"Got: '{actual_email}'", "ERROR"
                 )
                 self._debug_dump(driver, f"email_mismatch_{attempt}")
-                # Coba clear dan re-type
                 try:
                     driver.execute_script("arguments[0].value = '';", email_el)
                 except Exception:
@@ -568,7 +586,6 @@ class AccountManagerMixin:
                 email_el.send_keys(Keys.RETURN)
                 self._log("Pressed Enter to submit email")
 
-            # ── Tunggu lalu cek apakah langsung kena error page ─────────────
             time.sleep(2)
             if self._is_lets_try_error_page(driver):
                 self._log("Error page appeared immediately after submit", "WARNING")
@@ -596,7 +613,6 @@ class AccountManagerMixin:
                 ]):
                     self._log(f"Target URL reached: {driver.current_url}")
                     break
-
                 if self._is_lets_try_error_page(driver):
                     self._log(
                         "'Let's try something else' detected while waiting for OTP redirect!",
@@ -604,7 +620,6 @@ class AccountManagerMixin:
                     )
                     self._debug_dump(driver, "lets_try_during_otp_wait")
                     return False
-
             except Exception:
                 pass
             time.sleep(1)
@@ -621,7 +636,6 @@ class AccountManagerMixin:
         for content_check in range(10):
             try:
                 src = driver.page_source.lower()
-
                 if any(k in src for k in _ERROR_PAGE_INDICATORS):
                     self._log(
                         "'Let's try something else' detected on OTP wait!",
@@ -629,7 +643,6 @@ class AccountManagerMixin:
                     )
                     self._debug_dump(driver, "lets_try_on_otp_content_check")
                     return False
-
                 if any(k in src for k in ["code sent", "verification code", "enter verification"]):
                     otp_content_ready = True
                     self._log("OTP page content ('code sent') confirmed loaded")
@@ -805,6 +818,10 @@ class AccountManagerMixin:
                 pass
         return False
 
+    # =========================================================================
+    # Initial setup: dismiss popup -> tools -> Veo
+    # =========================================================================
+
     def _initial_setup(self, driver):
         self._log("Step 16: Closing 'I'll do this later' popup...")
         dismissed = False
@@ -826,25 +843,67 @@ class AccountManagerMixin:
             self._log("No 'do this later' popup found, proceeding...", "WARNING")
         self._wait_page_ready(driver, timeout=15, label="Post-Dismiss Popup")
 
+        # ── [FIX] Tunggu Shadow DOM siap sebelum klik tools ──────────────────
+        self._log("Step 17: Waiting for Shadow DOM to be ready before clicking tools...")
+        shadow_ready = self._wait_shadow_dom_ready(driver, timeout=_SHADOW_DOM_READY_TIMEOUT)
+        if not shadow_ready:
+            self._log(
+                "Shadow DOM not ready after timeout! Trying to click tools anyway...",
+                "WARNING"
+            )
+            # Debug: list semua button yang terdeteksi di seluruh shadow roots
+            try:
+                btns_json = driver.execute_script(_JS_LIST_BUTTONS)
+                self._log(f"[SHADOW DEBUG] Buttons found in DOM: {btns_json[:500] if btns_json else 'none'}")
+            except Exception:
+                pass
+            self._debug_dump(driver, "shadow_dom_not_ready")
+        else:
+            # Tunggu sedikit extra agar animasi/transisi selesai setelah shadowRoot ready
+            time.sleep(1)
+
         self._log("Step 17: Clicking tools button...")
         tools_clicked = False
         for tools_try in range(1, 6):
             try:
                 result = driver.execute_script(_JS_CLICK_TOOLS)
                 if result:
-                    self._log("Tools button clicked")
+                    self._log(f"Tools button clicked (attempt {tools_try})")
                     tools_clicked = True
                     break
+                else:
+                    # JS dieksekusi tanpa error tapi return false/null
+                    # → Shadow DOM tree mungkin berubah, dump debug info
+                    self._log(
+                        f"Tools button JS returned falsy (attempt {tools_try}/5), "
+                        "Shadow DOM might still be loading...",
+                        "WARNING"
+                    )
+                    try:
+                        btns_json = driver.execute_script(_JS_LIST_BUTTONS)
+                        self._log(
+                            f"[SHADOW DEBUG attempt {tools_try}] "
+                            f"Buttons: {btns_json[:800] if btns_json else 'none'}"
+                        )
+                    except Exception:
+                        pass
+                    if tools_try == 1:
+                        self._debug_dump(driver, "tools_btn_js_false")
             except Exception as e:
-                self._log(f"Tools button attempt {tools_try}/5: {e}", "WARNING")
-            if tools_try < 5:
-                time.sleep(3)
+                self._log(f"Tools button attempt {tools_try}/5 exception: {e}", "WARNING")
+
+            if not tools_clicked and tools_try < 5:
+                # Re-poll Shadow DOM sebelum retry berikutnya
+                self._log(f"Re-waiting Shadow DOM before tools retry {tools_try + 1}...")
+                self._wait_shadow_dom_ready(driver, timeout=8)
+                time.sleep(1)
 
         if not tools_clicked:
             self._log("Tools button not found after retries", "WARNING")
             self._debug_dump(driver, "tools_btn_not_found")
             return
 
+        # Tunggu menu tools terbuka (animasi)
         time.sleep(2)
 
         self._log("Step 18: Selecting 'Create videos with Veo'...")
@@ -856,6 +915,11 @@ class AccountManagerMixin:
                     self._log("Clicked 'Create videos with Veo'")
                     veo_clicked = True
                     break
+                else:
+                    self._log(
+                        f"Veo JS returned falsy (attempt {veo_try}/5)",
+                        "WARNING"
+                    )
             except Exception as e:
                 self._log(f"Veo menu attempt {veo_try}/5: {e}", "WARNING")
 
@@ -881,6 +945,7 @@ class AccountManagerMixin:
                 break
             if veo_try < 5:
                 time.sleep(2)
+                # Re-open tools menu jika sudah tertutup
                 try:
                     result = driver.execute_script(_JS_CLICK_TOOLS)
                     if result:
@@ -895,3 +960,31 @@ class AccountManagerMixin:
 
         self._wait_page_ready(driver, timeout=15, label="Post-Veo Selection")
         self._log("Initial setup completed!")
+
+    # =========================================================================
+    # Helper: tunggu Shadow DOM ready khusus tools
+    # =========================================================================
+
+    def _wait_shadow_dom_ready(self, driver, timeout: int = _SHADOW_DOM_READY_TIMEOUT) -> bool:
+        self._log(f"Waiting for Shadow DOM (ucs-search-bar) to be ready (max {timeout}s)...")
+        deadline = time.time() + timeout
+        attempt  = 0
+        while time.time() < deadline:
+            attempt += 1
+            try:
+                ready = driver.execute_script(_JS_SHADOW_READY)
+                if ready:
+                    elapsed = attempt * _SHADOW_DOM_POLL_INTERVAL
+                    self._log(f"Shadow DOM ready (attempt {attempt}, ~{elapsed:.1f}s)")
+                    return True
+            except Exception as e:
+                if attempt == 1:
+                    self._log(f"Shadow DOM check error: {e}", "WARNING")
+            if attempt % 5 == 0:
+                self._log(
+                    f"Shadow DOM not yet ready "
+                    f"({int(time.time() - deadline + timeout)}s elapsed), still waiting..."
+                )
+            time.sleep(_SHADOW_DOM_POLL_INTERVAL)
+        self._log(f"Shadow DOM NOT ready after {timeout}s!", "WARNING")
+        return False
