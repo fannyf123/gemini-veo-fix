@@ -22,6 +22,27 @@ function _sr(el, sel) {
 _JS_APP_ROOT = "document.querySelector('body > ucs-standalone-app')"
 
 # ================================================================
+# Helper internal: klik md-icon-button dengan benar
+# Struktur: md-icon-button > #shadow-root > button#button > span.touch
+# Yang merespons klik adalah span.touch, bukan elemen luar
+# ================================================================
+_JS_CLICK_MD_ICON_BUTTON = """
+function clickMdIconButton(btn) {
+    if (!btn) return false;
+    // Coba span.touch di shadowRoot button internal
+    if (btn.shadowRoot) {
+        var touch = btn.shadowRoot.querySelector('#button > span.touch') ||
+                    btn.shadowRoot.querySelector('span.touch') ||
+                    btn.shadowRoot.querySelector('#button');
+        if (touch) { touch.click(); return true; }
+    }
+    // Fallback langsung klik elemennya
+    btn.click();
+    return true;
+}
+"""
+
+# ================================================================
 # Step 16 - Dismiss popup 'I'll do this later'
 # ================================================================
 _JS_DISMISS_POPUP = """
@@ -48,10 +69,24 @@ _JS_DISMISS_POPUP = """
 
 # ================================================================
 # Step 17 - Click tools button
-# Tries: new path (main > ucs-chat-landing) -> old path (div > ucs-chat-landing)
+# FIX: klik span.touch di dalam shadowRoot button, bukan anchor/md-icon
+# Dari DevTools: #tool-selector-menu-anchor > #shadow-root > button#button > span.touch
 # ================================================================
 _JS_CLICK_TOOLS = """
 (function() {
+    // Helper: klik md-icon-button dengan benar via span.touch
+    function clickMdIconButton(btn) {
+        if (!btn) return false;
+        if (btn.shadowRoot) {
+            var touch = btn.shadowRoot.querySelector('#button > span.touch') ||
+                        btn.shadowRoot.querySelector('span.touch') ||
+                        btn.shadowRoot.querySelector('#button');
+            if (touch) { touch.click(); return true; }
+        }
+        btn.click();
+        return true;
+    }
+
     var app = document.querySelector("body > ucs-standalone-app");
     if (!app || !app.shadowRoot) return false;
     var appRoot = app.shadowRoot;
@@ -76,44 +111,37 @@ _JS_CLICK_TOOLS = """
         for (var si = 0; si < searchBarSelectors.length; si++) {
             var searchBar = landing.shadowRoot.querySelector(searchBarSelectors[si]);
             if (!searchBar || !searchBar.shadowRoot) continue;
+            var sbRoot = searchBar.shadowRoot;
 
-            // Try clicking md-icon inside #tool-selector-menu-anchor first
-            var anchor = searchBar.shadowRoot.querySelector("#tool-selector-menu-anchor");
+            // Path utama: #tool-selector-menu-anchor -> span.touch di shadowRoot-nya
+            var anchor = sbRoot.querySelector("#tool-selector-menu-anchor");
             if (anchor) {
-                var mdIcon = anchor.querySelector("md-icon");
-                if (mdIcon) { mdIcon.click(); return true; }
-                anchor.click();
-                return true;
+                return clickMdIconButton(anchor);
             }
 
-            // Fallback selectors
-            var fallbackSelectors = [
-                "div > form > div > div.actions-buttons > div.tools-button-container > md-icon-button",
-                "[id='tool-selector-menu-anchor']"
-            ];
-            for (var ai = 0; ai < fallbackSelectors.length; ai++) {
-                var el = searchBar.shadowRoot.querySelector(fallbackSelectors[ai]);
-                if (el) { el.click(); return true; }
+            // Fallback: cari md-icon-button dengan aria-label mengandung "tool"
+            var allBtns = sbRoot.querySelectorAll("md-icon-button");
+            for (var bi = 0; bi < allBtns.length; bi++) {
+                var aria = (allBtns[bi].getAttribute('aria-label') || '').toLowerCase();
+                if (aria.includes('tool') || aria.includes('select')) {
+                    return clickMdIconButton(allBtns[bi]);
+                }
             }
         }
     }
 
-    // Deep-scan fallback: search ALL shadow roots for the tools button
-    function deepScan(root) {
+    // Deep-scan fallback: cari #tool-selector-menu-anchor di semua shadow roots
+    function deepScan(root, depth) {
+        if (depth > 8) return false;
         var anchor = root.querySelector ? root.querySelector("#tool-selector-menu-anchor") : null;
-        if (anchor) {
-            var mdIcon = anchor.querySelector("md-icon");
-            if (mdIcon) { mdIcon.click(); return true; }
-            anchor.click();
-            return true;
-        }
+        if (anchor) return clickMdIconButton(anchor);
         var all = root.querySelectorAll ? root.querySelectorAll("*") : [];
         for (var i = 0; i < all.length; i++) {
-            if (all[i].shadowRoot && deepScan(all[i].shadowRoot)) return true;
+            if (all[i].shadowRoot && deepScan(all[i].shadowRoot, depth + 1)) return true;
         }
         return false;
     }
-    return deepScan(document);
+    return deepScan(document, 0);
 })();
 """
 
@@ -160,10 +188,8 @@ _JS_CLICK_VEO = """
                 for (var ii = 0; ii < items.length; ii++) {
                     var txt = (items[ii].textContent || items[ii].innerText || "").toLowerCase();
                     if (txt.includes("veo") || txt.includes("video")) {
-                        // Try clicking md-icon inside the menu item first (user's confirmed path)
                         var icon = items[ii].querySelector("md-icon");
                         if (icon) { icon.click(); return true; }
-                        // Fallback: click the item's inner div or the item itself
                         var innerDiv = items[ii].querySelector("div");
                         if (innerDiv) { innerDiv.click(); return true; }
                         items[ii].click();
@@ -172,7 +198,6 @@ _JS_CLICK_VEO = """
                 }
             }
 
-            // Last resort: try the exact nth-child(7) path targeting md-icon directly
             var directIcon = sbRoot.querySelector("div > form > div > div.actions-buttons.omnibar.multiline-input-actions-buttons > div.tools-button-container > md-menu > div:nth-child(7) > md-menu-item > md-icon");
             if (directIcon) { directIcon.click(); return true; }
             var directDiv = sbRoot.querySelector("div > form > div > div.actions-buttons.omnibar.multiline-input-actions-buttons > div.tools-button-container > md-menu > div:nth-child(7) > md-menu-item > div");
@@ -180,8 +205,9 @@ _JS_CLICK_VEO = """
         }
     }
 
-    // Deep-scan fallback: search ALL shadow roots for Veo menu item
-    function deepScan(root) {
+    // Deep-scan fallback
+    function deepScan(root, depth) {
+        if (depth > 8) return false;
         var items = root.querySelectorAll ? root.querySelectorAll("md-menu-item") : [];
         for (var i = 0; i < items.length; i++) {
             var txt = (items[i].textContent || items[i].innerText || "").toLowerCase();
@@ -194,11 +220,11 @@ _JS_CLICK_VEO = """
         }
         var all = root.querySelectorAll ? root.querySelectorAll("*") : [];
         for (var i = 0; i < all.length; i++) {
-            if (all[i].shadowRoot && deepScan(all[i].shadowRoot)) return true;
+            if (all[i].shadowRoot && deepScan(all[i].shadowRoot, depth + 1)) return true;
         }
         return false;
     }
-    return deepScan(document);
+    return deepScan(document, 0);
 })();
 """
 
@@ -211,7 +237,6 @@ _JS_GET_PROMPT_INPUT = """
     if (!app || !app.shadowRoot) return null;
     var appRoot = app.shadowRoot;
 
-    // After Veo selected, page may be on chat or landing
     var containerSelectors = [
         "div > div.ucs-standalone-outer-row-container > div > main > ucs-chat-landing",
         "div > div.ucs-standalone-outer-row-container > div > ucs-chat-landing",
@@ -243,10 +268,8 @@ _JS_GET_PROMPT_INPUT = """
                 var editor = searchBar.shadowRoot.querySelector(editorSelectors[ei]);
                 if (!editor) continue;
                 if (editor.shadowRoot) {
-                    // User's confirmed path: div > div > div > p
                     var p = editor.shadowRoot.querySelector("div > div > div > p");
                     if (p) return p;
-                    // Fallback: look for ProseMirror contenteditable div
                     var pm = editor.shadowRoot.querySelector(".ProseMirror");
                     if (pm) return pm;
                     var ce = editor.shadowRoot.querySelector("[contenteditable='true']");
