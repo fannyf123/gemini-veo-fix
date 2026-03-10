@@ -7,6 +7,7 @@ dan initial setup (dismiss popup, tools, Veo selection).
 
 import time
 import random
+import re
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -23,7 +24,7 @@ from App.js_constants import (
 GEMINI_HOME_URL        = "https://business.gemini.google/"
 OTP_TIMEOUT            = 90
 MAX_ACCOUNT_RETRY      = 3
-MAX_EMAIL_SUBMIT_RETRY = 5   # dinaikkan karena ada kemungkinan retry dari error page
+MAX_EMAIL_SUBMIT_RETRY = 5
 
 # JS path exact untuk tombol "Sign up or sign in" di error page
 _JS_SIGN_IN_ERROR_BTN = (
@@ -38,7 +39,6 @@ _ERROR_PAGE_INDICATORS = [
     "lets try something else",
     "trouble retrieving the email",
     "go back to sign up or sign in",
-    "sign up or sign in",
 ]
 
 FIRST_NAMES = [
@@ -97,12 +97,24 @@ class AccountManagerMixin:
             return False
         self._log(f"Temp email obtained: {email}")
 
+        # ── KUNCI FIX: simpan email aktif sebagai state bersama ──────────────────
+        # Ini adalah single source of truth selama satu sesi registrasi.
+        # Semua fungsi harus merujuk ke variabel ini, bukan re-read dari DOM.
+        active_email = email
+        self._log(f"[EMAIL STATE] active_email locked: {active_email}")
+
         self._log("Step 4: Kembali ke Gemini, input email, crosscheck, dan lanjut")
         driver.switch_to.window(gemini_tab)
 
-        submitted = self._step_4_submit_email(driver, email)
+        # Pass active_email — jika terjadi recovery, _step_4_submit_email
+        # akan memakai email yang sama, tidak re-fetch dari mailticking
+        submitted, active_email = self._step_4_submit_email(
+            driver, active_email, mail_tab=mail_tab
+        )
         if not submitted:
             return False
+
+        self._log(f"[EMAIL STATE] Email submitted to Gemini: {active_email}")
 
         self._log("Step 5: Tunggu OTP page dan 'code sent'")
         self._wait_page_ready(driver, timeout=20, label="OTP Page")
@@ -112,8 +124,50 @@ class AccountManagerMixin:
             return False
         self._log("OTP page loaded and 'Code sent' verified.")
 
+        # ── Verifikasi email di Gemini OTP page vs active_email ─────────────────
+        gemini_otp_email = self._read_email_from_gemini_otp_page(driver)
+        if gemini_otp_email:
+            self._log(f"[EMAIL STATE] Gemini OTP page shows email: {gemini_otp_email}")
+            if gemini_otp_email.lower() != active_email.lower():
+                self._log(
+                    f"[EMAIL MISMATCH DETECTED] Gemini OTP email '{gemini_otp_email}' "
+                    f"!= active_email '{active_email}'. Updating active_email.",
+                    "WARNING"
+                )
+                active_email = gemini_otp_email
+        else:
+            self._log("Could not read email from Gemini OTP page, using active_email", "WARNING")
+
         self._log("Step 6: Kembali ke mailticking, cek inbox")
         driver.switch_to.window(mail_tab)
+
+        # ── Verifikasi email aktif di mailticking sama dengan active_email ───────
+        mail_current_email = self._mail_client._read_email_from_navbar(driver)
+        if not mail_current_email:
+            mail_current_email = self._mail_client._read_email_from_modal(driver)
+
+        if mail_current_email and mail_current_email.lower() != active_email.lower():
+            self._log(
+                f"[EMAIL MISMATCH] mailticking shows '{mail_current_email}' "
+                f"but active_email is '{active_email}'. Re-syncing mailticking...",
+                "WARNING"
+            )
+            # Coba paksa mailticking pindah ke active_email via URL langsung
+            resynced = self._resync_mailticking_email(driver, active_email)
+            if not resynced:
+                self._log(
+                    "Cannot re-sync mailticking to active_email. "
+                    "Using mailticking's current email as active_email instead.",
+                    "WARNING"
+                )
+                # Fallback: pakai email yang ada di mailticking sebagai patokan
+                # HANYA jika Gemini OTP page tidak bisa dikonfirmasi
+                if not gemini_otp_email:
+                    active_email = mail_current_email
+                    self._log(f"[EMAIL STATE] active_email updated to mailticking email: {active_email}")
+        else:
+            self._log(f"[EMAIL STATE] mailticking email confirmed: {mail_current_email or 'same as active_email'}")
+
         found = self._mail_client.wait_for_verification_email(
             driver,
             mail_tab_handle=mail_tab,
@@ -129,7 +183,7 @@ class AccountManagerMixin:
         if not otp:
             self._log("Could not extract OTP", "ERROR")
             return False
-        self._log(f"OTP obtained: {otp}")
+        self._log(f"OTP obtained: {otp} (for email: {active_email})")
 
         driver.switch_to.window(gemini_tab)
         self._wait_page_ready(driver, timeout=15, label="Gemini Tab (OTP)")
@@ -244,6 +298,69 @@ class AccountManagerMixin:
         return True
 
     # =========================================================================
+    # Helper: baca email yang ditampilkan Gemini di OTP page
+    # =========================================================================
+
+    def _read_email_from_gemini_otp_page(self, driver) -> str:
+        """
+        Baca email yang ditampilkan Gemini di OTP/verification page.
+        Gemini biasanya menampilkan "Code sent to user@domain.com" atau
+        menampilkan email di elemen tertentu.
+        Return email string atau "".
+        """
+        try:
+            src = driver.page_source
+            # Pattern 1: "Code sent to email@domain.com"
+            m = re.search(
+                r'(?:code sent to|sent to|verify)\s+([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})',
+                src, re.IGNORECASE
+            )
+            if m:
+                return m.group(1).strip()
+
+            # Pattern 2: email muncul di dalam teks biasa
+            m = re.search(
+                r'([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})',
+                src
+            )
+            if m:
+                candidate = m.group(1)
+                # Filter agar tidak ambil email google/internal
+                if not any(d in candidate.lower() for d in [
+                    "google.com", "googleapis", "example.com", "noreply"
+                ]):
+                    return candidate.strip()
+        except Exception:
+            pass
+        return ""
+
+    # =========================================================================
+    # Helper: re-sinkronisasi mailticking ke email yang benar
+    # =========================================================================
+
+    def _resync_mailticking_email(self, driver, target_email: str) -> bool:
+        """
+        Coba paksa mailticking untuk menampilkan inbox dari target_email.
+        Mailticking tidak support deep-link per email, jadi cara terbaik:
+        1. Refresh tab mailticking
+        2. Baca email yang aktif
+        3. Jika masih berbeda, lakukan get_fresh_email ulang (Change)
+        Return True jika berhasil sync atau email sudah sama.
+        """
+        self._log(f"Trying to re-sync mailticking to: {target_email}")
+        try:
+            driver.refresh()
+            self._wait_page_ready(driver, timeout=15, label="Mailticking Resync Refresh")
+            current = self._mail_client._read_email_from_navbar(driver)
+            if current and current.lower() == target_email.lower():
+                self._log(f"Mailticking re-sync OK: {current}")
+                return True
+            self._log(f"After refresh: mailticking shows '{current}', target is '{target_email}'", "WARNING")
+        except Exception as e:
+            self._log(f"Resync refresh error: {e}", "WARNING")
+        return False
+
+    # =========================================================================
     # Helper: deteksi dan tangani error page "Let's try something else"
     # =========================================================================
 
@@ -255,12 +372,11 @@ class AccountManagerMixin:
         except Exception:
             return False
 
-    def _handle_lets_try_something_else(self, driver, email: str) -> bool:
+    def _handle_lets_try_something_else(self, driver) -> bool:
         """
         Deteksi error page "Let's try something else".
-        Klik tombol 'Sign up or sign in', tunggu kembali ke halaman email input,
-        lalu submit email lagi.
-        Return True jika berhasil kembali ke OTP flow.
+        Klik tombol 'Sign up or sign in', tunggu kembali ke halaman email input.
+        Return True jika berhasil kembali ke email input page.
         """
         self._log(
             "[!] 'Let's try something else' page detected! "
@@ -287,10 +403,10 @@ class AccountManagerMixin:
                 try:
                     for el in driver.find_elements(By.TAG_NAME, tag):
                         txt = (el.text or "").strip().lower()
-                        if "sign up" in txt or "sign in" in txt:
+                        if "sign up" in txt or ("sign in" in txt and "sign up" not in txt):
                             if el.is_displayed():
                                 driver.execute_script("arguments[0].click();", el)
-                                self._log(f"Clicked 'Sign up or sign in' via text fallback ({tag})")
+                                self._log(f"Clicked 'Sign up or sign in' via text fallback ({tag}: '{txt}')")
                                 clicked = True
                                 break
                 except Exception:
@@ -298,13 +414,12 @@ class AccountManagerMixin:
                 if clicked:
                     break
 
-        # Priority 3: span class AeBiU-vQzf8d (inner span dari button)
+        # Priority 3: span class AeBiU-vQzf8d
         if not clicked:
             try:
                 spans = driver.find_elements(By.CSS_SELECTOR, "span.AeBiU-vQzf8d")
                 for span in spans:
                     if span.is_displayed():
-                        # Klik parent button-nya
                         try:
                             parent = span.find_element(By.XPATH, "./ancestor::button")
                             driver.execute_script("arguments[0].click();", parent)
@@ -327,11 +442,12 @@ class AccountManagerMixin:
         self._log("Waiting for email input page to load...")
         try:
             WebDriverWait(driver, 20).until(
-                lambda d: any(k in d.current_url.lower() for k in [
-                    "business.gemini.google",
-                    "accounts.google",
-                    "gemini.google",
-                ]) and "lets-try" not in d.current_url.lower()
+                lambda d: (
+                    any(k in d.current_url.lower() for k in [
+                        "business.gemini.google", "accounts.google", "gemini.google"
+                    ])
+                    and all(k not in d.current_url.lower() for k in ["lets-try", "error"])
+                )
             )
         except TimeoutException:
             pass
@@ -358,28 +474,35 @@ class AccountManagerMixin:
             except Exception:
                 pass
 
-        self._log("Recovery complete - re-submitting email...")
+        self._log("Recovery complete - back at email input page.")
         return True
 
     # =========================================================================
     # Step 4: Submit email + handle error page
+    # Returns (success: bool, active_email: str)
     # =========================================================================
 
-    def _step_4_submit_email(self, driver, email: str) -> bool:
-        for attempt in range(1, MAX_EMAIL_SUBMIT_RETRY + 1):
-            self._log(f"Submit email attempt {attempt}/{MAX_EMAIL_SUBMIT_RETRY}")
+    def _step_4_submit_email(self, driver, email: str, mail_tab: str = ""):
+        """
+        Submit email ke Gemini. Return tuple (success, active_email).
+        active_email bisa berbeda dari input email jika terjadi recovery
+        yang memerlukan email baru dari mailticking.
+        """
+        active_email = email
 
-            # ── Cek dulu apakah kita di error page ──────────────────────────────────
+        for attempt in range(1, MAX_EMAIL_SUBMIT_RETRY + 1):
+            self._log(f"Submit email attempt {attempt}/{MAX_EMAIL_SUBMIT_RETRY} (email: {active_email})")
+
+            # ── Cek dulu apakah kita di error page ──────────────────────────
             if self._is_lets_try_error_page(driver):
-                recovered = self._handle_lets_try_something_else(driver, email)
+                recovered = self._handle_lets_try_something_else(driver)
                 if not recovered:
                     self._log("Recovery from error page failed", "ERROR")
-                    return False
-                # Setelah recovery, lanjut ke input email di attempt berikutnya
+                    return False, active_email
                 time.sleep(1)
                 continue
 
-            # ── Cari email input ──────────────────────────────────────────────────
+            # ── Cari email input ─────────────────────────────────────────────
             email_el = None
             try:
                 email_el = driver.execute_script('return document.querySelector("#email-input");')
@@ -398,16 +521,35 @@ class AccountManagerMixin:
                 self._wait_page_ready(driver, timeout=30, extra_selector="#email-input")
                 continue
 
-            if not self._verified_type(driver, email_el, email, field_name="Email"):
+            # ── Clear field sebelum typing untuk hindari sisa nilai lama ────
+            try:
+                driver.execute_script("arguments[0].value = '';", email_el)
+                email_el.click()
+                time.sleep(0.2)
+            except Exception:
+                pass
+
+            if not self._verified_type(driver, email_el, active_email, field_name="Email"):
                 self._log("Email input typing failed!", "ERROR")
                 self._debug_dump(driver, f"email_verify_fail_{attempt}")
                 continue
 
             actual_email = driver.execute_script("return arguments[0].value;", email_el) or ""
-            if actual_email.strip().lower() != email.strip().lower():
-                self._log(f"EMAIL MISMATCH! Expected: '{email}', Got: '{actual_email}'", "ERROR")
+            actual_email = actual_email.strip()
+
+            if actual_email.lower() != active_email.lower():
+                self._log(
+                    f"EMAIL MISMATCH after typing! Expected: '{active_email}', "
+                    f"Got: '{actual_email}'", "ERROR"
+                )
                 self._debug_dump(driver, f"email_mismatch_{attempt}")
+                # Coba clear dan re-type
+                try:
+                    driver.execute_script("arguments[0].value = '';", email_el)
+                except Exception:
+                    pass
                 continue
+
             self._log(f"Email cross-check OK: '{actual_email}'")
             time.sleep(random.uniform(0.3, 0.6))
 
@@ -426,19 +568,20 @@ class AccountManagerMixin:
                 email_el.send_keys(Keys.RETURN)
                 self._log("Pressed Enter to submit email")
 
-            # ── Tunggu sebentar lalu cek apakah langsung kena error page ─────────
+            # ── Tunggu lalu cek apakah langsung kena error page ─────────────
             time.sleep(2)
             if self._is_lets_try_error_page(driver):
                 self._log("Error page appeared immediately after submit", "WARNING")
-                recovered = self._handle_lets_try_something_else(driver, email)
+                recovered = self._handle_lets_try_something_else(driver)
                 if not recovered:
-                    return False
-                continue  # retry submit dari awal
+                    return False, active_email
+                continue
 
-            return True
+            self._log(f"Email submit successful: {active_email}")
+            return True, active_email
 
         self._log("Failed to submit email after all attempts", "ERROR")
-        return False
+        return False, active_email
 
     # =========================================================================
     def _wait_for_otp_page(self, driver) -> bool:
@@ -447,7 +590,6 @@ class AccountManagerMixin:
         while time.time() < deadline:
             try:
                 url = driver.current_url.lower()
-                # Sukses: sudah di OTP page
                 if any(k in url for k in [
                     "accountverification", "verify-oob-code",
                     "oauth2/authorize", "signin-callback"
@@ -455,14 +597,13 @@ class AccountManagerMixin:
                     self._log(f"Target URL reached: {driver.current_url}")
                     break
 
-                # Error page terdeteksi saat menunggu redirect
                 if self._is_lets_try_error_page(driver):
                     self._log(
                         "'Let's try something else' detected while waiting for OTP redirect!",
                         "WARNING"
                     )
                     self._debug_dump(driver, "lets_try_during_otp_wait")
-                    return False  # signal ke _register_once untuk retry
+                    return False
 
             except Exception:
                 pass
@@ -481,7 +622,6 @@ class AccountManagerMixin:
             try:
                 src = driver.page_source.lower()
 
-                # Sekali lagi cek error page di sini
                 if any(k in src for k in _ERROR_PAGE_INDICATORS):
                     self._log(
                         "'Let's try something else' detected on OTP wait!",
@@ -705,7 +845,6 @@ class AccountManagerMixin:
             self._debug_dump(driver, "tools_btn_not_found")
             return
 
-        # Wait for the tools menu to fully open/animate
         time.sleep(2)
 
         self._log("Step 18: Selecting 'Create videos with Veo'...")
@@ -742,12 +881,11 @@ class AccountManagerMixin:
                 break
             if veo_try < 5:
                 time.sleep(2)
-                # Re-open tools menu if it closed
                 try:
                     result = driver.execute_script(_JS_CLICK_TOOLS)
                     if result:
                         self._log("Re-opened tools menu")
-                        time.sleep(2)  # Wait for menu animation
+                        time.sleep(2)
                 except Exception:
                     pass
 
