@@ -9,13 +9,9 @@ Selector utama berdasarkan outerHTML yang dikonfirmasi langsung dari DevTools:
 - Step 17: jslog=283108, id=tool-selector-menu-anchor (md-text-button tools)
 - Step 18: jslog=283118 (md-menu-item Veo)
 - Step 19: id=agent-search-prosemirror-editor (ucs-prosemirror-editor)
+- Step 20: tag=ucs-agent-thoughts, class=show-summary-text
+- Step 21a: class=download-button, data-aria-label=Download video file (md-filled-icon-button)
 """
-
-# ================================================================
-# Helper: klik elemen Material Design (md-text-button / md-icon-button)
-# Struktur: md-*-button > #shadow-root > button#button > span.touch
-# span.touch adalah touch target yang sebenarnya
-# ================================================================
 
 # ================================================================
 # Step 16 - Dismiss popup 'I'll do this later'
@@ -34,13 +30,10 @@ _JS_DISMISS_POPUP = """
         btn.click();
         return true;
     }
-
     function deepScan(root, depth) {
         if (depth > 8) return false;
-        // Primary: jslog=283097
         var btn = root.querySelector ? root.querySelector("[jslog*='283097']") : null;
         if (btn) return clickBtn(btn);
-        // Fallback: md-text-button dengan text 'do this later'
         var btns = root.querySelectorAll ? root.querySelectorAll('md-text-button') : [];
         for (var i = 0; i < btns.length; i++) {
             var txt = (btns[i].textContent || '').toLowerCase();
@@ -77,19 +70,14 @@ _JS_CLICK_TOOLS = """
         btn.click();
         return true;
     }
-
     function deepScan(root, depth) {
         if (depth > 8) return false;
-        // Primary: jslog=283108
         var btn = root.querySelector ? root.querySelector("[jslog*='283108']") : null;
         if (btn) return clickBtn(btn);
-        // Secondary: id=tool-selector-menu-anchor
         btn = root.querySelector ? root.querySelector("#tool-selector-menu-anchor") : null;
         if (btn) return clickBtn(btn);
-        // Tertiary: class omnibox-tools-selector
         btn = root.querySelector ? root.querySelector(".omnibox-tools-selector") : null;
         if (btn) return clickBtn(btn);
-        // Fallback: data-aria-label="Select tools"
         btn = root.querySelector ? root.querySelector("[data-aria-label='Select tools']") : null;
         if (btn) return clickBtn(btn);
         var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
@@ -118,19 +106,15 @@ _JS_CLICK_VEO = """
                         btn.shadowRoot.querySelector('#item');
             if (touch) { touch.click(); return true; }
         }
-        // Klik div[slot=headline] di dalam menu item
         var headline = btn.querySelector("[slot='headline']") || btn.querySelector('div');
         if (headline) { headline.click(); return true; }
         btn.click();
         return true;
     }
-
     function deepScan(root, depth) {
         if (depth > 8) return false;
-        // Primary: jslog=283118
         var item = root.querySelector ? root.querySelector("[jslog*='283118']") : null;
         if (item) return clickBtn(item);
-        // Fallback: md-menu-item dengan text 'veo' atau 'video'
         var items = root.querySelectorAll ? root.querySelectorAll('md-menu-item') : [];
         for (var i = 0; i < items.length; i++) {
             var txt = (items[i].textContent || '').toLowerCase();
@@ -156,7 +140,6 @@ _JS_GET_PROMPT_INPUT = """
 (function() {
     function findEditor(root, depth) {
         if (depth > 8) return null;
-        // Primary: id=agent-search-prosemirror-editor
         var editor = root.querySelector ? root.querySelector('#agent-search-prosemirror-editor') : null;
         if (editor) {
             if (editor.shadowRoot) {
@@ -167,7 +150,6 @@ _JS_GET_PROMPT_INPUT = """
             }
             return editor;
         }
-        // Fallback: ucs-prosemirror-editor
         editor = root.querySelector ? root.querySelector('ucs-prosemirror-editor') : null;
         if (editor) {
             if (editor.shadowRoot) {
@@ -191,147 +173,124 @@ _JS_GET_PROMPT_INPUT = """
 """
 
 # ================================================================
-# Step 20 - Get thinking message element
+# Step 20 - Get thinking/loading indicator element
+# Confirmed outerHTML:
+#   <ucs-agent-thoughts class="show-summary-text animate-header"
+#     spk2="" dark-theme="" next-gen="" next-gen-batch-2="">
+# Deteksi: elemen ada = masih loading/thinking
 # ================================================================
 _JS_GET_THINKING = """
 (function() {
-    var app = document.querySelector("body > ucs-standalone-app");
-    if (!app || !app.shadowRoot) return null;
-    var appRoot = app.shadowRoot;
-
-    var resultsSelectors = [
-        "div > div.ucs-standalone-outer-row-container > div > div.search-bar-and-results-container > div > ucs-results",
-        "div > div.ucs-standalone-outer-row-container > div > ucs-results",
-        "ucs-results"
-    ];
-
-    for (var ri = 0; ri < resultsSelectors.length; ri++) {
-        var results = appRoot.querySelector(resultsSelectors[ri]);
-        if (!results || !results.shadowRoot) continue;
-
-        var convSelectors = [
-            "div > div > div.tile.chat-mode-conversation.chat-mode-conversation > div.chat-mode-scroller.tile-content > ucs-conversation",
-            "ucs-conversation"
-        ];
-
-        for (var ci = 0; ci < convSelectors.length; ci++) {
-            var conv = results.shadowRoot.querySelector(convSelectors[ci]);
-            if (!conv || !conv.shadowRoot) continue;
-
-            var summarySelectors = [
-                "div > div.turn.last > ucs-summary",
-                "div > div > ucs-summary",
-                "ucs-summary"
-            ];
-
-            for (var ssi = 0; ssi < summarySelectors.length; ssi++) {
-                var summary = conv.shadowRoot.querySelector(summarySelectors[ssi]);
-                if (!summary || !summary.shadowRoot) continue;
-
-                var thinkingSelectors = [
-                    "div > div > div.summary-contents > div.header.agent-thoughts-header > ucs-agent-thoughts",
-                    "ucs-agent-thoughts"
-                ];
-
-                for (var ti = 0; ti < thinkingSelectors.length; ti++) {
-                    var thoughts = summary.shadowRoot.querySelector(thinkingSelectors[ti]);
-                    if (!thoughts || !thoughts.shadowRoot) continue;
-                    var msg = thoughts.shadowRoot.querySelector("div.header > div.thinking-message") ||
-                              thoughts.shadowRoot.querySelector(".thinking-message");
-                    if (msg) return msg;
-                }
+    function findThoughts(root, depth) {
+        if (depth > 8) return null;
+        // Primary: tag ucs-agent-thoughts dengan class show-summary-text
+        var el = root.querySelector ? root.querySelector('ucs-agent-thoughts.show-summary-text') : null;
+        if (el) return el;
+        // Secondary: tag ucs-agent-thoughts saja
+        el = root.querySelector ? root.querySelector('ucs-agent-thoughts') : null;
+        if (el) return el;
+        // Fallback: cari .thinking-message di dalam shadow root
+        var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot) {
+                var found = findThoughts(all[i].shadowRoot, depth + 1);
+                if (found) return found;
             }
         }
+        return null;
     }
-    return null;
+    var el = findThoughts(document, 0);
+    if (!el) return null;
+    // Coba ambil teks thinking dari shadowRoot
+    if (el.shadowRoot) {
+        var msg = el.shadowRoot.querySelector('div.header > div.thinking-message') ||
+                  el.shadowRoot.querySelector('.thinking-message') ||
+                  el.shadowRoot.querySelector('.header');
+        if (msg) return msg;
+    }
+    return el;
 })();
 """
 
 # ================================================================
 # Step 21a - Click download button
+# Confirmed outerHTML:
+#   <md-filled-icon-button class="download-button"
+#     data-aria-label="Download video file"
+#     aria-describedby="ucs-tooltip-40">
+#     <md-icon aria-hidden="true">download</md-icon>
 # ================================================================
 _JS_CLICK_DOWNLOAD = """
 (function() {
-    var app = document.querySelector("body > ucs-standalone-app");
-    if (!app || !app.shadowRoot) return null;
-    var appRoot = app.shadowRoot;
-
-    var resultsSelectors = [
-        "div > div.ucs-standalone-outer-row-container > div > div.search-bar-and-results-container > div > ucs-results",
-        "ucs-results"
-    ];
-
-    for (var ri = 0; ri < resultsSelectors.length; ri++) {
-        var results = appRoot.querySelector(resultsSelectors[ri]);
-        if (!results || !results.shadowRoot) continue;
-
-        var convSelectors = [
-            "div > div > div.tile.chat-mode-conversation.chat-mode-conversation > div.chat-mode-scroller.tile-content > ucs-conversation",
-            "ucs-conversation"
-        ];
-
-        for (var ci = 0; ci < convSelectors.length; ci++) {
-            var conv = results.shadowRoot.querySelector(convSelectors[ci]);
-            if (!conv || !conv.shadowRoot) continue;
-
-            var summarySelectors = [
-                "div > div > ucs-summary",
-                "div > div.turn.last > ucs-summary",
-                "ucs-summary"
-            ];
-
-            for (var ssi = 0; ssi < summarySelectors.length; ssi++) {
-                var summary = conv.shadowRoot.querySelector(summarySelectors[ssi]);
-                if (!summary || !summary.shadowRoot) continue;
-
-                var attach = summary.shadowRoot.querySelector("div > div > div.summary-contents > ucs-summary-attachments") ||
-                             summary.shadowRoot.querySelector("ucs-summary-attachments");
-                if (!attach || !attach.shadowRoot) continue;
-
-                var vid = attach.shadowRoot.querySelector("div > ucs-markdown-video") ||
-                          attach.shadowRoot.querySelector("ucs-markdown-video");
-                if (!vid || !vid.shadowRoot) continue;
-
-                var dlBtn = vid.shadowRoot.querySelector("div > div.video-actions > md-filled-icon-button") ||
-                            vid.shadowRoot.querySelector("md-filled-icon-button");
-                if (!dlBtn) continue;
-
-                var touch = dlBtn.shadowRoot ? dlBtn.shadowRoot.querySelector("#button > span.touch") : null;
-                return touch || dlBtn;
-            }
+    function clickBtn(btn) {
+        if (!btn) return false;
+        if (btn.shadowRoot) {
+            var touch = btn.shadowRoot.querySelector('#button > span.touch') ||
+                        btn.shadowRoot.querySelector('span.touch') ||
+                        btn.shadowRoot.querySelector('#button');
+            if (touch) { touch.click(); return true; }
         }
+        btn.click();
+        return true;
     }
-    return null;
+    function findDownload(root, depth) {
+        if (depth > 8) return false;
+        // Primary: class=download-button
+        var btn = root.querySelector ? root.querySelector('.download-button') : null;
+        if (btn) return clickBtn(btn);
+        // Secondary: data-aria-label="Download video file"
+        btn = root.querySelector ? root.querySelector("[data-aria-label='Download video file']") : null;
+        if (btn) return clickBtn(btn);
+        // Tertiary: md-filled-icon-button yang mengandung md-icon download
+        var btns = root.querySelectorAll ? root.querySelectorAll('md-filled-icon-button') : [];
+        for (var i = 0; i < btns.length; i++) {
+            var icon = btns[i].querySelector('md-icon');
+            if (icon && (icon.textContent || '').trim() === 'download') return clickBtn(btns[i]);
+        }
+        var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot && findDownload(all[i].shadowRoot, depth + 1)) return true;
+        }
+        return false;
+    }
+    return findDownload(document, 0);
 })();
 """
 
 # ================================================================
 # Step 21b - Click download confirmation
+# outerHTML 21b yang dikopi adalah md-ripple (bagian dalam shadow root)
+# Tetap pakai selector stabil: md-text-button di dalam ucs-download-warning-dialog
 # ================================================================
 _JS_CLICK_CONFIRM = """
 (function() {
-    var app = document.querySelector("body > ucs-standalone-app");
-    if (!app || !app.shadowRoot) return null;
-    var appRoot = app.shadowRoot;
-
-    var results = appRoot.querySelector("ucs-results");
-    if (!results || !results.shadowRoot) return null;
-    var conv = results.shadowRoot.querySelector("ucs-conversation");
-    if (!conv || !conv.shadowRoot) return null;
-    var summary = conv.shadowRoot.querySelector("ucs-summary");
-    if (!summary || !summary.shadowRoot) return null;
-    var attach = summary.shadowRoot.querySelector("ucs-summary-attachments");
-    if (!attach || !attach.shadowRoot) return null;
-    var vid = attach.shadowRoot.querySelector("ucs-markdown-video");
-    if (!vid || !vid.shadowRoot) return null;
-    var dlWarn = vid.shadowRoot.querySelector("ucs-download-warning-dialog");
-    if (!dlWarn || !dlWarn.shadowRoot) return null;
-    var confirmBtn = dlWarn.shadowRoot.querySelector("md-dialog > div:nth-child(3) > md-text-button.action-button") ||
-                     dlWarn.shadowRoot.querySelector("md-text-button.action-button") ||
-                     dlWarn.shadowRoot.querySelector("md-text-button");
-    if (!confirmBtn) return null;
-    var touch = confirmBtn.shadowRoot ? confirmBtn.shadowRoot.querySelector("#button > span.touch") : null;
-    return touch || confirmBtn;
+    function clickBtn(btn) {
+        if (!btn) return false;
+        if (btn.shadowRoot) {
+            var touch = btn.shadowRoot.querySelector('#button > span.touch') ||
+                        btn.shadowRoot.querySelector('span.touch') ||
+                        btn.shadowRoot.querySelector('#button');
+            if (touch) { touch.click(); return true; }
+        }
+        btn.click();
+        return true;
+    }
+    function findConfirm(root, depth) {
+        if (depth > 8) return false;
+        // Cari dialog konfirmasi download
+        var dlWarn = root.querySelector ? root.querySelector('ucs-download-warning-dialog') : null;
+        if (dlWarn && dlWarn.shadowRoot) {
+            var confirmBtn = dlWarn.shadowRoot.querySelector('md-text-button.action-button') ||
+                             dlWarn.shadowRoot.querySelector('md-text-button');
+            if (confirmBtn) return clickBtn(confirmBtn);
+        }
+        var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot && findConfirm(all[i].shadowRoot, depth + 1)) return true;
+        }
+        return false;
+    }
+    return findConfirm(document, 0);
 })();
 """
 
