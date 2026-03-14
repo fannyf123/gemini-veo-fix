@@ -1,19 +1,24 @@
 """
 account_manager.py
 
-Logika registrasi akun menggunakan exact CSS selector dari DevTools:
-- Step 2/5  : #email-input
-- Step 4    : #active-mail (mailticking)
-- Step 6    : #log-in-button > span.UywwFc-RLmnJb
-- Step 7    : #c2 (code sent indicator)
-- Step 8    : #message-list > tr:nth-child(1) > td.col-6 > a
-- Step 9    : #content-wrapper > table > ... > span (verification code)
-- Step 10   : input di form OTP (CSS selector dari DevTools)
-- Step 11   : tombol Verify (CSS selector dari DevTools)
-- Step 12   : #full-name-label (tunggu muncul)
-- Step 13   : #mat-input-0
-- Step 14   : span.mdc-button__label di dalam form agree
-- Step 15   : tunggu body > saasfe-root ... h1 hilang (loading selesai)
+Flow step terbaru:
+  Step 1  : Buka business.gemini.google
+  Step 2  : Buka mailticking.com di tab baru
+            - Uncheck @gmail     : #emailActivationModal ... div:nth-child(3) > label
+            - Uncheck @googlemail: #emailActivationModal ... div:nth-child(2) > label  (jika ada)
+            - Sisakan @domain.com: #emailActivationModal ... div:nth-child(1) > label
+  Step 3  : Klik [#modalChange], pastikan email bukan @gmail/@googlemail,
+            klik Activate [#emailActivationModal ... a]
+  Step 4  : Copy email dari [#selectedEmail], switch ke Gemini,
+            input ke [#email-input]
+  Step 5  : Submit email via [#log-in-button > span.UywwFc-RLmnJb]
+  Step 6  : Tunggu OTP page [#c2]
+  Step 7  : Baca inbox mailticking [#message-list > tr:nth-child(1) > td.col-6 > a]
+  Step 8  : Ambil kode OTP dari email
+  Step 9  : Input OTP + klik Verify
+  Step 10 : Isi nama [#mat-input-0]
+  Step 11 : Klik Agree [span.mdc-button__label]
+  Step 12 : Tunggu loading selesai (h1 hilang)
 """
 
 import time
@@ -35,40 +40,52 @@ from App.js_constants import (
 )
 
 GEMINI_HOME_URL        = "https://business.gemini.google/"
+MAILTICKING_URL        = "https://www.mailticking.com/"
 OTP_TIMEOUT            = 90
 MAX_ACCOUNT_RETRY      = 3
 MAX_EMAIL_SUBMIT_RETRY = 5
 
-# CSS Selectors dari DevTools (exact)
-_SEL_EMAIL_INPUT     = "#email-input"
-_SEL_ACTIVE_MAIL     = "#active-mail"              # mailticking email display
-_SEL_LOGIN_BTN       = "#log-in-button > span.UywwFc-RLmnJb"
-_SEL_CODE_SENT       = "#c2"                       # indikator 'code sent'
-_SEL_MSG_LIST_FIRST  = "#message-list > tr:nth-child(1) > td.col-6 > a"
-_SEL_VERIF_CODE      = (
-    "#content-wrapper > table > tbody > tr > td > table > tbody "
-    "> tr:nth-child(1) > td > table > tbody > tr > td "
-    "> p.verification-code-container > span"
-)
-_SEL_OTP_INPUT       = (
+# ── Gemini selectors ────────────────────────────────────────────────────────
+_SEL_EMAIL_INPUT    = "#email-input"
+_SEL_LOGIN_BTN      = "#log-in-button > span.UywwFc-RLmnJb"
+_SEL_CODE_SENT      = "#c2"
+_SEL_OTP_INPUT      = (
     "#yDmH0d > c-wiz > div > div > div.keerLb > div > div > div > form "
     "> div:nth-child(1) > div > div.AFffCd > div > input"
 )
-_SEL_VERIFY_BTN      = (
+_SEL_VERIFY_BTN     = (
     "#yDmH0d > c-wiz > div > div > div.keerLb > div > div > div > form "
     "> div.rPlx0b > div > div:nth-child(1) > span "
     "> div.VfPpkd-dgl2Hf-ppHlrf-sM5MNb > button > span.YUhpIc-RLmnJb"
 )
 _SEL_FULL_NAME_LABEL = "#full-name-label"
-_SEL_NAME_INPUT      = "#mat-input-0"
-_SEL_AGREE_BTN       = (
+_SEL_NAME_INPUT     = "#mat-input-0"
+_SEL_AGREE_BTN      = (
     "body > saasfe-root > main > saasfe-onboard-component "
     "> div > div > div > form > button > span.mdc-button__label"
 )
-_SEL_LOADING_H1      = (
+_SEL_LOADING_H1     = (
     "body > saasfe-root > main > saasfe-onboard-component "
     "> div > div.loading-message > h1"
 )
+
+# ── Mailticking selectors ────────────────────────────────────────────────────
+# Modal body checkbox labels (dari DevTools)
+_SEL_MT_MODAL_BODY      = "#emailActivationModal > div > div > div.modal-body.pt-4 > div > div > div > div.form-group"
+_SEL_MT_LABEL_DOMAIN    = _SEL_MT_MODAL_BODY + " > div:nth-child(1) > label"   # @domain.com (sisakan)
+_SEL_MT_LABEL_GMAIL     = _SEL_MT_MODAL_BODY + " > div:nth-child(3) > label"   # @gmail.com  (uncheck)
+_SEL_MT_LABEL_GOOGLEMAIL= _SEL_MT_MODAL_BODY + " > div:nth-child(2) > label"   # @googlemail (uncheck jika ada)
+# Checkbox input di dalam tiap label (untuk cek status)
+_SEL_MT_CHK_DOMAIN      = _SEL_MT_MODAL_BODY + " > div:nth-child(1) > label > input"
+_SEL_MT_CHK_GMAIL       = _SEL_MT_MODAL_BODY + " > div:nth-child(3) > input, " + _SEL_MT_MODAL_BODY + " > div:nth-child(3) > label > input"
+# Tombol Change & Activate
+_SEL_MT_CHANGE_BTN      = "#modalChange"
+_SEL_MT_SELECTED_EMAIL  = "#selectedEmail"
+_SEL_MT_ACTIVATE_BTN    = "#emailActivationModal > div > div > div.modal-footer.text-center > a"
+# Tombol buka modal (biasanya tombol di header mailticking)
+_SEL_MT_OPEN_MODAL      = "#changeEmailBtn, .change-email-btn, [data-target='#emailActivationModal'], [data-bs-target='#emailActivationModal']"
+
+_GMAIL_DOMAINS = ["@gmail.com", "@googlemail.com", "@gmail.", "@googlemail."]
 
 _ERROR_PAGE_INDICATORS = [
     "let's try something else",
@@ -93,8 +110,12 @@ def _random_name() -> str:
     return f"{random.choice(FIRST_NAMES)} {random.choice(LAST_NAMES)}"
 
 
+def _is_gmail_email(email: str) -> bool:
+    email_lower = email.lower()
+    return any(email_lower.endswith(d.rstrip('.')) or d in email_lower for d in _GMAIL_DOMAINS)
+
+
 def _wait_for_css(driver, selector, timeout=15, visible=False):
-    """Tunggu elemen CSS selector muncul. visible=True untuk tunggu visible."""
     try:
         condition = (
             EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
@@ -107,7 +128,6 @@ def _wait_for_css(driver, selector, timeout=15, visible=False):
 
 
 def _css_click(driver, selector, timeout=15, js_click=False):
-    """Tunggu lalu klik elemen CSS selector."""
     el = _wait_for_css(driver, selector, timeout, visible=True)
     if not el:
         return False
@@ -126,7 +146,6 @@ def _css_click(driver, selector, timeout=15, js_click=False):
 
 
 def _css_type(driver, selector, text, timeout=15, clear=True):
-    """Tunggu lalu ketik teks ke elemen CSS selector."""
     el = _wait_for_css(driver, selector, timeout, visible=True)
     if not el:
         return False
@@ -137,6 +156,15 @@ def _css_type(driver, selector, text, timeout=15, clear=True):
             driver.execute_script("arguments[0].value = '';", el)
         el.send_keys(text)
         return True
+    except Exception:
+        return False
+
+
+def _is_checked(driver, selector) -> bool:
+    """Return True jika checkbox CSS selector dalam keadaan checked."""
+    try:
+        el = driver.find_element(By.CSS_SELECTOR, selector)
+        return el.is_selected()
     except Exception:
         return False
 
@@ -156,98 +184,229 @@ class AccountManagerMixin:
         return False
 
     def _register_once(self, driver, worker_id=0) -> bool:
-        # ── Step 1-2: Buka Gemini, tunggu email input ──────────────────────
-        self._log(f"[W-{worker_id}] Step 1: Buka business.gemini.google")
+
+        # ──────────────────────────────────────────────────────────────────
+        # STEP 1: Buka business.gemini.google
+        # ──────────────────────────────────────────────────────────────────
+        self._log("Step 1: Buka business.gemini.google")
         try:
             driver.get(GEMINI_HOME_URL)
             WebDriverWait(driver, 20).until(lambda d: d.current_url != "about:blank")
         except Exception:
             pass
-
-        # Step 2: Tunggu #email-input
-        self._log("Step 2: Tunggu #email-input...")
-        if not _wait_for_css(driver, _SEL_EMAIL_INPUT, timeout=30, visible=True):
-            self._log("Step 2: #email-input tidak muncul!", "ERROR")
-            self._debug_dump(driver, "no_email_input")
-            return False
-        self._log("Step 2: #email-input ready")
         gemini_tab = driver.current_window_handle
 
-        # ── Step 3: Buka mailticking di tab baru ───────────────────────────
-        self._log("Step 3: Buka mailticking.com di tab baru")
+        # ──────────────────────────────────────────────────────────────────
+        # STEP 2: Buka mailticking.com di tab baru
+        # ──────────────────────────────────────────────────────────────────
+        self._log("Step 2: Buka mailticking.com")
         driver.execute_script("window.open('about:blank', '_blank');")
         time.sleep(0.5)
         driver.switch_to.window(driver.window_handles[-1])
         mail_tab = driver.current_window_handle
-
-        from App.mailticking import MAILTICKING_URL
         driver.get(MAILTICKING_URL)
         self._wait_page_ready(driver, timeout=30, label="mailticking.com")
+        time.sleep(1)
 
-        # Step 4: Baca email dari #active-mail
-        self._log("Step 4: Baca email dari #active-mail")
-        email = ""
-        for attempt in range(10):
+        # Buka modal email activation
+        self._log("Step 2: Buka modal email activation")
+        modal_opened = False
+
+        # Coba klik tombol buka modal
+        for sel in [
+            _SEL_MT_OPEN_MODAL,
+            "button[data-target='#emailActivationModal']",
+            "a[data-target='#emailActivationModal']",
+            "[data-bs-toggle='modal'][data-bs-target='#emailActivationModal']",
+            ".change-email",
+        ]:
             try:
-                el = _wait_for_css(driver, _SEL_ACTIVE_MAIL, timeout=5, visible=True)
-                if el:
-                    email = (el.text or el.get_attribute("value") or "").strip()
-                    if "@" in email:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                for el in els:
+                    if el.is_displayed():
+                        driver.execute_script("arguments[0].click();", el)
+                        modal_opened = True
                         break
             except Exception:
                 pass
-            time.sleep(2)
+            if modal_opened:
+                break
 
-        if not email or "@" not in email:
-            # Fallback ke method lama
-            email = self._mail_client.get_fresh_email(driver)
+        # Fallback: JS Bootstrap modal show
+        if not modal_opened:
+            try:
+                driver.execute_script(
+                    "var m = document.querySelector('#emailActivationModal');"
+                    "if(m){ var bsModal = bootstrap.Modal.getOrCreateInstance(m); bsModal.show(); }"
+                )
+                modal_opened = True
+                self._log("Step 2: Modal dibuka via JS Bootstrap")
+            except Exception:
+                pass
 
-        if not email or "@" not in email:
-            self._log("Step 4: Gagal mendapatkan email temp", "ERROR")
+        # Tunggu modal muncul
+        modal_el = _wait_for_css(driver, "#emailActivationModal", timeout=10, visible=True)
+        if not modal_el:
+            self._log("Step 2: Modal tidak muncul, coba JS show", "WARNING")
+            try:
+                driver.execute_script(
+                    "var m = document.querySelector('#emailActivationModal');"
+                    "if(m){ m.style.display='block'; m.classList.add('show'); }"
+                )
+                time.sleep(0.5)
+            except Exception:
+                pass
+
+        time.sleep(0.8)
+
+        # Uncheck @gmail (div:nth-child(3) > label)
+        self._log("Step 2: Uncheck @gmail")
+        self._uncheck_label(driver, _SEL_MT_LABEL_GMAIL)
+
+        # Uncheck @googlemail (div:nth-child(2) > label) jika ada
+        self._log("Step 2: Uncheck @googlemail (jika ada)")
+        self._uncheck_label(driver, _SEL_MT_LABEL_GOOGLEMAIL)
+
+        # Pastikan @domain.com (div:nth-child(1) > label) tetap checked
+        self._log("Step 2: Pastikan @domain.com checked")
+        self._ensure_checked(driver, _SEL_MT_LABEL_DOMAIN)
+
+        # ──────────────────────────────────────────────────────────────────
+        # STEP 3: Klik Change, pastikan email bukan gmail, klik Activate
+        # ──────────────────────────────────────────────────────────────────
+        self._log("Step 3: Klik #modalChange")
+        change_ok = _css_click(driver, _SEL_MT_CHANGE_BTN, timeout=10, js_click=True)
+        if not change_ok:
+            self._log("Step 3: #modalChange tidak ditemukan, coba fallback", "WARNING")
+            try:
+                # Cari tombol berteks 'change'
+                for btn in driver.find_elements(By.TAG_NAME, "button"):
+                    if "change" in (btn.text or "").lower() and btn.is_displayed():
+                        driver.execute_script("arguments[0].click();", btn)
+                        break
+            except Exception:
+                pass
+        time.sleep(1)
+
+        # Cek email hasil change di #selectedEmail
+        email = ""
+        for attempt in range(8):
+            try:
+                el = _wait_for_css(driver, _SEL_MT_SELECTED_EMAIL, timeout=5, visible=True)
+                if el:
+                    val = (el.text or el.get_attribute("value") or el.get_attribute("innerHTML") or "").strip()
+                    # Bersihkan tag HTML jika ada
+                    val = re.sub(r'<[^>]+>', '', val).strip()
+                    if "@" in val:
+                        email = val
+                        break
+            except Exception:
+                pass
+            time.sleep(1)
+
+        if not email:
+            self._log("Step 3: Email tidak ditemukan di #selectedEmail", "WARNING")
+            # Fallback: ambil dari #active-mail
+            try:
+                el = _wait_for_css(driver, "#active-mail", timeout=5, visible=True)
+                if el:
+                    email = (el.text or "").strip()
+            except Exception:
+                pass
+
+        self._log(f"Step 3: Email kandidat: {email}")
+
+        # Jika masih gmail, tekan Change lagi sampai dapat non-gmail
+        max_change = 10
+        change_count = 0
+        while email and _is_gmail_email(email) and change_count < max_change:
+            self._log(f"Step 3: Email masih gmail ({email}), change lagi...", "WARNING")
+            _css_click(driver, _SEL_MT_CHANGE_BTN, timeout=5, js_click=True)
+            time.sleep(1.5)
+            change_count += 1
+            try:
+                el = _wait_for_css(driver, _SEL_MT_SELECTED_EMAIL, timeout=4, visible=True)
+                if el:
+                    val = (el.text or el.get_attribute("value") or "").strip()
+                    val = re.sub(r'<[^>]+>', '', val).strip()
+                    if "@" in val:
+                        email = val
+            except Exception:
+                pass
+
+        if not email or _is_gmail_email(email):
+            self._log(f"Step 3: Tidak bisa dapat email non-gmail setelah {max_change}x", "ERROR")
+            self._debug_dump(driver, "no_nongmail_email")
             return False
-        self._log(f"Step 4: Email: {email}")
 
-        # ── Step 5-6: Input email ke Gemini ────────────────────────────────
-        self._log("Step 5: Switch ke Gemini, input email")
+        self._log(f"Step 3: Email non-gmail confirmed: {email}")
+
+        # Klik Activate
+        self._log("Step 3: Klik Activate")
+        activate_ok = _css_click(driver, _SEL_MT_ACTIVATE_BTN, timeout=10, js_click=True)
+        if not activate_ok:
+            self._log("Step 3: Activate button tidak ditemukan, coba fallback", "WARNING")
+            try:
+                for a in driver.find_elements(By.TAG_NAME, "a"):
+                    if "activate" in (a.text or "").lower() and a.is_displayed():
+                        driver.execute_script("arguments[0].click();", a)
+                        activate_ok = True
+                        break
+            except Exception:
+                pass
+        if activate_ok:
+            self._log("Step 3: Activate diklik")
+        else:
+            self._log("Step 3: Activate tidak bisa diklik, lanjut...", "WARNING")
+        time.sleep(1)
+
+        # ──────────────────────────────────────────────────────────────────
+        # STEP 4: Switch ke Gemini, input email ke #email-input
+        # ──────────────────────────────────────────────────────────────────
+        self._log(f"Step 4: Switch ke Gemini, input email: {email}")
         driver.switch_to.window(gemini_tab)
+
+        # Tunggu #email-input
+        if not _wait_for_css(driver, _SEL_EMAIL_INPUT, timeout=30, visible=True):
+            self._log("Step 4: #email-input tidak muncul!", "ERROR")
+            self._debug_dump(driver, "no_email_input")
+            return False
 
         submitted = False
         for attempt in range(1, MAX_EMAIL_SUBMIT_RETRY + 1):
-            self._log(f"Step 5: Submit email attempt {attempt}/{MAX_EMAIL_SUBMIT_RETRY}")
+            self._log(f"Step 4: Submit email attempt {attempt}/{MAX_EMAIL_SUBMIT_RETRY}")
 
             if self._is_lets_try_error_page(driver):
                 self._handle_lets_try_something_else(driver)
                 time.sleep(1)
                 continue
 
-            # Ketik email ke #email-input
             if not _css_type(driver, _SEL_EMAIL_INPUT, email, timeout=15):
-                self._log("Step 5: Tidak bisa ketik ke #email-input", "WARNING")
+                self._log("Step 4: Tidak bisa ketik ke #email-input", "WARNING")
                 self._debug_dump(driver, f"type_email_fail_{attempt}")
                 time.sleep(2)
                 driver.refresh()
                 _wait_for_css(driver, _SEL_EMAIL_INPUT, timeout=20, visible=True)
                 continue
 
-            # Verifikasi isi input
+            # Verifikasi isi
             try:
                 el = driver.find_element(By.CSS_SELECTOR, _SEL_EMAIL_INPUT)
                 actual = (el.get_attribute("value") or "").strip()
                 if actual.lower() != email.lower():
-                    self._log(f"Step 5: Mismatch email: '{actual}' != '{email}'", "WARNING")
+                    self._log(f"Step 4: Mismatch: '{actual}' vs '{email}'", "WARNING")
                     driver.execute_script("arguments[0].value = '';", el)
                     continue
             except Exception:
                 pass
 
-            # Step 6: Klik tombol login
-            self._log("Step 6: Klik #log-in-button")
+            # Klik tombol login
+            self._log("Step 4: Klik #log-in-button")
             if not _css_click(driver, _SEL_LOGIN_BTN, timeout=10, js_click=True):
-                # Fallback: tekan Enter
                 try:
                     el = driver.find_element(By.CSS_SELECTOR, _SEL_EMAIL_INPUT)
                     el.send_keys(Keys.RETURN)
-                    self._log("Step 6: Fallback Enter key")
+                    self._log("Step 4: Fallback Enter key")
                 except Exception:
                     pass
 
@@ -257,18 +416,19 @@ class AccountManagerMixin:
                 continue
 
             submitted = True
-            self._log(f"Step 6: Email submitted: {email}")
+            self._log(f"Step 4: Email submitted: {email}")
             break
 
         if not submitted:
-            self._log("Step 6: Gagal submit email", "ERROR")
+            self._log("Step 4: Gagal submit email", "ERROR")
             return False
 
-        # ── Step 7: Tunggu OTP page (#c2 muncul) ───────────────────────────
-        self._log("Step 7: Tunggu OTP page (#c2)...")
+        # ──────────────────────────────────────────────────────────────────
+        # STEP 5: Tunggu OTP page (#c2)
+        # ──────────────────────────────────────────────────────────────────
+        self._log("Step 5: Tunggu OTP page (#c2)...")
         self._wait_page_ready(driver, timeout=20, label="OTP Page")
 
-        # Tunggu URL berubah ke verification page
         deadline = time.time() + 60
         while time.time() < deadline:
             try:
@@ -276,56 +436,68 @@ class AccountManagerMixin:
                 if any(k in url for k in ["accountverification", "verify-oob-code", "oauth2", "signin-callback"]):
                     break
                 if self._is_lets_try_error_page(driver):
-                    self._log("Step 7: Error page pada OTP wait", "WARNING")
+                    self._log("Step 5: Error page pada OTP wait", "WARNING")
                     return False
             except Exception:
                 pass
             time.sleep(1)
 
-        # Tunggu #c2 (code sent indicator)
         code_sent_el = _wait_for_css(driver, _SEL_CODE_SENT, timeout=30, visible=False)
         if code_sent_el:
-            self._log("Step 7: #c2 ditemukan - OTP page ready")
+            self._log("Step 5: #c2 ditemukan - OTP page ready")
         else:
-            self._log("Step 7: #c2 tidak ditemukan, lanjut...", "WARNING")
+            self._log("Step 5: #c2 tidak ditemukan, lanjut...", "WARNING")
 
-        # ── Step 8: Baca email OTP dari mailticking ─────────────────────────
-        self._log("Step 8: Switch ke mailticking, tunggu email OTP")
+        # ──────────────────────────────────────────────────────────────────
+        # STEP 6: Switch mailticking, tunggu email OTP masuk
+        # ──────────────────────────────────────────────────────────────────
+        self._log("Step 6: Switch mailticking, tunggu email OTP")
         driver.switch_to.window(mail_tab)
 
-        # Tunggu email masuk: klik #message-list tr pertama
         otp_link = None
         deadline = time.time() + OTP_TIMEOUT
         while time.time() < deadline:
             try:
-                el = _wait_for_css(driver, _SEL_MSG_LIST_FIRST, timeout=3, visible=True)
+                el = _wait_for_css(
+                    driver,
+                    "#message-list > tr:nth-child(1) > td.col-6 > a",
+                    timeout=3, visible=True
+                )
                 if el:
                     otp_link = el
-                    self._log("Step 8: Email OTP ditemukan di message list")
+                    self._log("Step 6: Email OTP ditemukan")
                     break
             except Exception:
                 pass
-            # Refresh inbox
             try:
-                refresh_btn = driver.find_element(By.CSS_SELECTOR, "#refresh-btn, .refresh, [data-action='refresh']")
+                refresh_btn = driver.find_element(
+                    By.CSS_SELECTOR,
+                    "#refresh-btn, .refresh, [data-action='refresh']"
+                )
                 driver.execute_script("arguments[0].click();", refresh_btn)
             except Exception:
                 pass
             time.sleep(3)
 
         if not otp_link:
-            self._log("Step 8: Email OTP tidak datang (timeout)", "ERROR")
+            self._log("Step 6: Email OTP tidak datang (timeout)", "ERROR")
             return False
 
-        # Klik email untuk membuka
         try:
             driver.execute_script("arguments[0].click();", otp_link)
             time.sleep(2)
         except Exception:
             pass
 
-        # Step 9: Ambil kode OTP dari span
-        self._log("Step 9: Ambil kode verifikasi")
+        # ──────────────────────────────────────────────────────────────────
+        # STEP 7: Ambil kode OTP
+        # ──────────────────────────────────────────────────────────────────
+        self._log("Step 7: Ambil kode verifikasi")
+        _SEL_VERIF_CODE = (
+            "#content-wrapper > table > tbody > tr > td > table > tbody "
+            "> tr:nth-child(1) > td > table > tbody > tr > td "
+            "> p.verification-code-container > span"
+        )
         otp = ""
         for attempt in range(5):
             try:
@@ -333,22 +505,23 @@ class AccountManagerMixin:
                 if el:
                     otp = (el.text or "").strip()
                     if otp and otp.isdigit() and len(otp) >= 4:
-                        self._log(f"Step 9: OTP: {otp}")
+                        self._log(f"Step 7: OTP: {otp}")
                         break
             except Exception:
                 pass
             time.sleep(2)
 
         if not otp:
-            # Fallback ke extract method lama
             otp = self._mail_client.extract_verification_code(driver, mail_tab_handle=mail_tab)
 
         if not otp:
-            self._log("Step 9: OTP tidak ditemukan", "ERROR")
+            self._log("Step 7: OTP tidak ditemukan", "ERROR")
             return False
 
-        # ── Step 10: Input OTP ─────────────────────────────────────────────
-        self._log(f"Step 10: Input OTP ke Gemini")
+        # ──────────────────────────────────────────────────────────────────
+        # STEP 8: Input OTP ke Gemini
+        # ──────────────────────────────────────────────────────────────────
+        self._log(f"Step 8: Input OTP ke Gemini")
         driver.switch_to.window(gemini_tab)
         self._wait_page_ready(driver, timeout=15, label="Gemini OTP Form")
         time.sleep(1)
@@ -357,7 +530,6 @@ class AccountManagerMixin:
         for attempt in range(1, 4):
             el = _wait_for_css(driver, _SEL_OTP_INPUT, timeout=10, visible=True)
             if not el:
-                # Fallback: cari input apapun yang visible
                 try:
                     inputs = driver.find_elements(By.CSS_SELECTOR, "input")
                     for inp in inputs:
@@ -368,7 +540,7 @@ class AccountManagerMixin:
                     pass
 
             if not el:
-                self._log(f"Step 10: OTP input tidak ditemukan (attempt {attempt}/3)", "WARNING")
+                self._log(f"Step 8: OTP input tidak ditemukan (attempt {attempt}/3)", "WARNING")
                 time.sleep(2)
                 continue
 
@@ -378,25 +550,26 @@ class AccountManagerMixin:
                 for char in otp:
                     ActionChains(driver).send_keys(char).perform()
                     time.sleep(random.uniform(0.12, 0.25))
-                self._log(f"Step 10: OTP diketik: {otp}")
+                self._log(f"Step 8: OTP diketik: {otp}")
                 otp_ok = True
                 break
             except Exception as e:
-                self._log(f"Step 10: Error ketik OTP attempt {attempt}: {e}", "WARNING")
+                self._log(f"Step 8: Error ketik OTP attempt {attempt}: {e}", "WARNING")
                 time.sleep(2)
 
         if not otp_ok:
-            self._log("Step 10: Gagal input OTP", "ERROR")
+            self._log("Step 8: Gagal input OTP", "ERROR")
             self._debug_dump(driver, "otp_type_failed")
             return False
 
         time.sleep(0.5)
 
-        # ── Step 11: Klik Verify ────────────────────────────────────────────
-        self._log("Step 11: Klik tombol Verify")
+        # ──────────────────────────────────────────────────────────────────
+        # STEP 9: Klik Verify
+        # ──────────────────────────────────────────────────────────────────
+        self._log("Step 9: Klik tombol Verify")
         verify_ok = _css_click(driver, _SEL_VERIFY_BTN, timeout=10, js_click=True)
         if not verify_ok:
-            # Fallback selectors
             for sel in ["button[jsname='LgbsSe']", "button[type='submit']", ".YUhpIc-RLmnJb"]:
                 if _css_click(driver, sel, timeout=5, js_click=True):
                     verify_ok = True
@@ -410,46 +583,35 @@ class AccountManagerMixin:
                             break
                     except Exception:
                         pass
-        if not verify_ok:
-            self._log("Step 11: Verify button tidak ditemukan", "WARNING")
+        if verify_ok:
+            self._log("Step 9: Verify clicked")
         else:
-            self._log("Step 11: Verify clicked")
+            self._log("Step 9: Verify button tidak ditemukan", "WARNING")
 
         time.sleep(random.uniform(0.3, 0.6))
 
-        # Cek apakah sudah past verification
-        try:
-            src = driver.page_source.lower()
-            if any(k in src for k in ["full name", "fullname", "agree", "get started"]):
-                self._log("Step 11: Already past verification")
-        except Exception:
-            pass
+        # ──────────────────────────────────────────────────────────────────
+        # STEP 10: Tunggu form nama & isi nama
+        # ──────────────────────────────────────────────────────────────────
+        self._log("Step 10: Tunggu form nama (#full-name-label)...")
+        _wait_for_css(driver, _SEL_FULL_NAME_LABEL, timeout=30, visible=False)
 
-        # ── Step 12: Tunggu #full-name-label ───────────────────────────────
-        self._log("Step 12: Tunggu form nama (#full-name-label)...")
-        name_page = _wait_for_css(driver, _SEL_FULL_NAME_LABEL, timeout=30, visible=False)
-        if name_page:
-            self._log("Step 12: Form nama muncul")
-        else:
-            self._log("Step 12: Form nama tidak muncul, lanjut...", "WARNING")
-
-        # ── Step 13: Ketik nama ─────────────────────────────────────────────
-        self._log("Step 13: Input nama (#mat-input-0)")
         name = _random_name()
         name_ok = _css_type(driver, _SEL_NAME_INPUT, name, timeout=15)
         if not name_ok:
-            self._log("Step 13: Name input fallback", "WARNING")
             for sel in ["input[formcontrolname='fullName']", "input[placeholder='Full name']"]:
                 if _css_type(driver, sel, name, timeout=5):
                     name_ok = True
                     break
         if name_ok:
-            self._log(f"Step 13: Nama diisi: {name}")
+            self._log(f"Step 10: Nama diisi: {name}")
         else:
-            self._log("Step 13: Nama tidak bisa diisi", "WARNING")
+            self._log("Step 10: Nama tidak bisa diisi", "WARNING")
 
-        # ── Step 14: Klik Agree & get started ──────────────────────────────
-        self._log("Step 14: Klik Agree & get started")
+        # ──────────────────────────────────────────────────────────────────
+        # STEP 11: Klik Agree & get started
+        # ──────────────────────────────────────────────────────────────────
+        self._log("Step 11: Klik Agree & get started")
         agree_ok = _css_click(driver, _SEL_AGREE_BTN, timeout=15, js_click=True)
         if not agree_ok:
             for sel in [".mdc-button__label", "button.mdc-button", "button[mat-flat-button]"]:
@@ -470,12 +632,14 @@ class AccountManagerMixin:
                 if agree_ok:
                     break
         if agree_ok:
-            self._log("Step 14: Agree clicked")
+            self._log("Step 11: Agree clicked")
         else:
-            self._log("Step 14: Agree button tidak ditemukan", "WARNING")
+            self._log("Step 11: Agree button tidak ditemukan", "WARNING")
 
-        # ── Step 15: Tunggu loading selesai (h1 hilang) ─────────────────────
-        self._log("Step 15: Tunggu sign-in selesai (loading h1 hilang)...")
+        # ──────────────────────────────────────────────────────────────────
+        # STEP 12: Tunggu loading selesai (h1 hilang)
+        # ──────────────────────────────────────────────────────────────────
+        self._log("Step 12: Tunggu sign-in selesai...")
         deadline = time.time() + 60
         while time.time() < deadline:
             try:
@@ -483,15 +647,14 @@ class AccountManagerMixin:
                 if not h1.is_displayed():
                     break
             except NoSuchElementException:
-                # h1 sudah hilang dari DOM = selesai
                 break
             except Exception:
                 break
             time.sleep(0.5)
-        self._log("Step 15: Sign-in selesai")
+        self._log("Step 12: Sign-in selesai")
         self._wait_page_ready(driver, timeout=20, label="Post-SignIn")
 
-        # ── Step 16-18: Initial setup (shadow DOM) ──────────────────────────
+        # ── Step 13-15: Initial setup shadow DOM (dismiss popup, tools, veo)
         self._log("Ensuring Gemini tab & shadow DOM ready...")
         self._ensure_gemini_tab(driver, gemini_tab)
 
@@ -516,10 +679,78 @@ class AccountManagerMixin:
         return True
 
     # =========================================================================
-    # Helper: ensure Gemini tab + wait shadow DOM ready
+    # Mailticking checkbox helpers
     # =========================================================================
 
-    # JS probe: cek tools button sudah ada di shadow DOM
+    def _uncheck_label(self, driver, label_selector: str):
+        """Uncheck checkbox dengan mengklik label, hanya jika saat ini checked."""
+        try:
+            label = _wait_for_css(driver, label_selector, timeout=5, visible=True)
+            if not label:
+                return
+            # Cari checkbox di dalam atau sebelum label
+            chk = None
+            try:
+                chk = label.find_element(By.CSS_SELECTOR, "input[type='checkbox']")
+            except Exception:
+                pass
+            if chk is None:
+                # Coba cari input sibling
+                try:
+                    parent = label.find_element(By.XPATH, "..")
+                    chk = parent.find_element(By.CSS_SELECTOR, "input[type='checkbox']")
+                except Exception:
+                    pass
+            if chk and chk.is_selected():
+                driver.execute_script("arguments[0].click();", label)
+                time.sleep(0.3)
+                self._log(f"Unchecked: {label_selector}")
+            elif chk and not chk.is_selected():
+                self._log(f"Already unchecked: {label_selector}")
+            else:
+                # Tidak bisa deteksi status, klik label saja dan lihat
+                # Cek via aria-checked atau class
+                try:
+                    cls = (label.get_attribute("class") or "").lower()
+                    checked_via_class = "checked" in cls or "active" in cls
+                    if checked_via_class:
+                        driver.execute_script("arguments[0].click();", label)
+                        self._log(f"Unchecked via class: {label_selector}")
+                except Exception:
+                    pass
+        except Exception as e:
+            self._log(f"_uncheck_label error ({label_selector}): {e}", "WARNING")
+
+    def _ensure_checked(self, driver, label_selector: str):
+        """Pastikan checkbox dalam keadaan checked."""
+        try:
+            label = _wait_for_css(driver, label_selector, timeout=5, visible=True)
+            if not label:
+                return
+            chk = None
+            try:
+                chk = label.find_element(By.CSS_SELECTOR, "input[type='checkbox']")
+            except Exception:
+                pass
+            if chk is None:
+                try:
+                    parent = label.find_element(By.XPATH, "..")
+                    chk = parent.find_element(By.CSS_SELECTOR, "input[type='checkbox']")
+                except Exception:
+                    pass
+            if chk and not chk.is_selected():
+                driver.execute_script("arguments[0].click();", label)
+                time.sleep(0.3)
+                self._log(f"Checked: {label_selector}")
+            else:
+                self._log(f"Already checked: {label_selector}")
+        except Exception as e:
+            self._log(f"_ensure_checked error ({label_selector}): {e}", "WARNING")
+
+    # =========================================================================
+    # Shadow DOM helpers
+    # =========================================================================
+
     _JS_WAIT_SHADOW_READY = """
     (function() {
         function scan(root, depth) {
@@ -577,7 +808,6 @@ class AccountManagerMixin:
 
         self._wait_page_ready(driver, timeout=20, label="Gemini Main (pre-setup)")
 
-        # Tunggu ucs-standalone-app
         deadline = time.time() + 20
         while time.time() < deadline:
             try:
@@ -588,11 +818,7 @@ class AccountManagerMixin:
             except Exception:
                 pass
             time.sleep(0.5)
-        else:
-            self._log("[TAB] ucs-standalone-app tidak muncul!", "WARNING")
-            self._debug_dump(driver, "no_ucs_app")
 
-        # Tunggu tools button ready di shadow DOM
         self._log("[TAB] Tunggu tools button di shadow DOM...")
         deadline = time.time() + 30
         while time.time() < deadline:
@@ -603,14 +829,7 @@ class AccountManagerMixin:
             except Exception:
                 pass
             time.sleep(0.5)
-        else:
-            self._log("[TAB] Shadow DOM timeout, lanjut...", "WARNING")
-            self._debug_dump(driver, "shadow_not_ready")
         time.sleep(1)
-
-    # =========================================================================
-    # Initial setup: step 16 (popup) -> 17 (tools) -> 18 (veo)
-    # =========================================================================
 
     def _initial_setup(self, driver):
         try:
@@ -618,23 +837,21 @@ class AccountManagerMixin:
         except Exception:
             pass
 
-        # Step 16: Dismiss popup
-        self._log("Step 16: Tutup popup 'I'll do this later'...")
+        self._log("Step 13 (shadow): Dismiss popup 'I'll do this later'...")
         dismissed = False
         for attempt in range(1, 4):
             try:
                 if driver.execute_script(_JS_DISMISS_POPUP):
-                    self._log("Step 16: Popup dismissed")
+                    self._log("Step 13: Popup dismissed")
                     dismissed = True
                     break
             except Exception as e:
-                self._log(f"Step 16 attempt {attempt}/3: {e}", "WARNING")
+                self._log(f"Step 13 attempt {attempt}/3: {e}", "WARNING")
                 time.sleep(2)
         if not dismissed:
-            self._log("Step 16: Popup tidak ditemukan, lanjut...", "WARNING")
+            self._log("Step 13: Popup tidak ditemukan, lanjut...", "WARNING")
         self._wait_page_ready(driver, timeout=15, label="Post-Dismiss")
 
-        # Tunggu tools button sekali lagi setelah dismiss
         deadline = time.time() + 20
         while time.time() < deadline:
             try:
@@ -645,51 +862,48 @@ class AccountManagerMixin:
             time.sleep(0.5)
         time.sleep(0.5)
 
-        # Step 17: Klik tools button
-        self._log("Step 17: Klik tools button...")
+        self._log("Step 14 (shadow): Klik tools button...")
         tools_clicked = False
         for attempt in range(1, 6):
             try:
                 result = driver.execute_script(_JS_CLICK_TOOLS)
                 if result:
-                    self._log(f"Step 17: Tools clicked (attempt {attempt})")
+                    self._log(f"Step 14: Tools clicked (attempt {attempt})")
                     tools_clicked = True
                     break
                 else:
-                    self._log(f"Step 17: Falsy (attempt {attempt}/5)", "WARNING")
+                    self._log(f"Step 14: Falsy (attempt {attempt}/5)", "WARNING")
                     try:
                         btns = driver.execute_script(_JS_LIST_BUTTONS)
                         self._log(f"[DEBUG] Buttons: {(btns or 'none')[:300]}")
                     except Exception:
                         pass
             except Exception as e:
-                self._log(f"Step 17 attempt {attempt}/5: {e}", "WARNING")
+                self._log(f"Step 14 attempt {attempt}/5: {e}", "WARNING")
             if attempt < 5:
                 time.sleep(3)
 
         if not tools_clicked:
-            self._log("Step 17: Tools button tidak ditemukan!", "WARNING")
+            self._log("Step 14: Tools button tidak ditemukan!", "WARNING")
             self._debug_dump(driver, "tools_not_found")
             return
 
         time.sleep(1.5)
 
-        # Step 18: Klik Veo
-        self._log("Step 18: Pilih 'Create videos with Veo'...")
+        self._log("Step 15 (shadow): Pilih 'Create videos with Veo'...")
         veo_clicked = False
         for attempt in range(1, 6):
             try:
                 result = driver.execute_script(_JS_CLICK_VEO)
                 if result:
-                    self._log("Step 18: Veo diklik")
+                    self._log("Step 15: Veo diklik")
                     veo_clicked = True
                     break
-                self._log(f"Step 18: Falsy (attempt {attempt}/5)", "WARNING")
+                self._log(f"Step 15: Falsy (attempt {attempt}/5)", "WARNING")
             except Exception as e:
-                self._log(f"Step 18 attempt {attempt}/5: {e}", "WARNING")
+                self._log(f"Step 15 attempt {attempt}/5: {e}", "WARNING")
             if not veo_clicked and attempt < 5:
                 time.sleep(2)
-                # Re-open tools menu
                 try:
                     driver.execute_script(_JS_CLICK_TOOLS)
                     time.sleep(1.5)
@@ -697,14 +911,14 @@ class AccountManagerMixin:
                     pass
 
         if not veo_clicked:
-            self._log("Step 18: Veo tidak ditemukan!", "WARNING")
+            self._log("Step 15: Veo tidak ditemukan!", "WARNING")
             self._debug_dump(driver, "veo_not_found")
 
         self._wait_page_ready(driver, timeout=15, label="Post-Veo")
-        self._log("Step 18: Initial setup selesai!")
+        self._log("Step 15: Initial setup selesai!")
 
     # =========================================================================
-    # Helper methods
+    # Misc helpers
     # =========================================================================
 
     def _is_lets_try_error_page(self, driver) -> bool:
@@ -724,65 +938,9 @@ class AccountManagerMixin:
             pass
         return True
 
-    def _read_email_from_gemini_otp_page(self, driver) -> str:
-        try:
-            src = driver.page_source
-            m = re.search(
-                r'(?:code sent to|sent to|verify)\s+([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})',
-                src, re.IGNORECASE
-            )
-            if m:
-                return m.group(1).strip()
-        except Exception:
-            pass
-        return ""
-
-    def _resync_mailticking_email(self, driver, target_email: str) -> bool:
-        try:
-            driver.refresh()
-            self._wait_page_ready(driver, timeout=15, label="Mailticking Resync")
-            el = _wait_for_css(driver, _SEL_ACTIVE_MAIL, timeout=5, visible=True)
-            if el:
-                current = (el.text or "").strip()
-                if current.lower() == target_email.lower():
-                    return True
-        except Exception:
-            pass
-        return False
-
     def _is_error_page(self, driver) -> bool:
         try:
             src = driver.page_source.lower()
             return any(k in src for k in ["something went wrong", "couldn't sign", "error occurred"])
         except Exception:
             return False
-
-    def _enter_name(self, driver) -> bool:
-        name = _random_name()
-        return _css_type(driver, _SEL_NAME_INPUT, name, timeout=10)
-
-    def _click_agree_button(self, driver) -> bool:
-        return _css_click(driver, _SEL_AGREE_BTN, timeout=10, js_click=True)
-
-    def _submit_otp(self, driver, otp: str) -> bool:
-        el = _wait_for_css(driver, _SEL_OTP_INPUT, timeout=10, visible=True)
-        if not el:
-            inputs = driver.find_elements(By.CSS_SELECTOR, "input")
-            for inp in inputs:
-                if inp.is_displayed() and (inp.get_attribute("type") or "").lower() in ("text", "tel", "number", ""):
-                    el = inp
-                    break
-        if not el:
-            return False
-        try:
-            el.click()
-            time.sleep(0.3)
-            for char in otp:
-                ActionChains(driver).send_keys(char).perform()
-                time.sleep(random.uniform(0.12, 0.25))
-            return True
-        except Exception:
-            return False
-
-    def _click_verify_button(self, driver) -> bool:
-        return _css_click(driver, _SEL_VERIFY_BTN, timeout=10, js_click=True)
