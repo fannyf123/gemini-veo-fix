@@ -116,6 +116,9 @@ class GeminiEnterpriseProcessor(BrowserHelpersMixin, AccountManagerMixin, VideoG
         self._log(f"Using fresh browser profile: {temp_profile}")
 
         headless = self.config.get("headless", False)
+        # Incognito mode: default True, bisa dimatikan via config {"incognito": false}
+        incognito = self.config.get("incognito", True)
+
         opts = Options()
         opts.add_argument(f"--user-data-dir={temp_profile}")
         opts.add_argument("--no-first-run")
@@ -125,6 +128,9 @@ class GeminiEnterpriseProcessor(BrowserHelpersMixin, AccountManagerMixin, VideoG
         opts.add_argument("--lang=en-US")
         opts.add_argument("--window-size=1280,900")
         opts.add_argument("--disable-popup-blocking")
+        if incognito:
+            opts.add_argument("--incognito")
+            self._log("Chrome incognito mode: ENABLED")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option("useAutomationExtension", False)
         opts.add_experimental_option("prefs", {
