@@ -116,8 +116,9 @@ class GeminiEnterpriseProcessor(BrowserHelpersMixin, AccountManagerMixin, VideoG
         self._log(f"Using fresh browser profile: {temp_profile}")
 
         headless = self.config.get("headless", False)
-        # Incognito mode: default True, bisa dimatikan via config {"incognito": false}
-        incognito = self.config.get("incognito", True)
+        # incognito: default False karena --incognito memblokir shadowRoot access
+        # pada beberapa versi Chrome. Aktifkan hanya jika benar-benar diperlukan.
+        incognito = self.config.get("incognito", False)
 
         opts = Options()
         opts.add_argument(f"--user-data-dir={temp_profile}")
@@ -130,7 +131,7 @@ class GeminiEnterpriseProcessor(BrowserHelpersMixin, AccountManagerMixin, VideoG
         opts.add_argument("--disable-popup-blocking")
         if incognito:
             opts.add_argument("--incognito")
-            self._log("Chrome incognito mode: ENABLED")
+            self._log("Chrome incognito mode: ENABLED (perhatian: dapat memblokir shadow DOM)")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option("useAutomationExtension", False)
         opts.add_experimental_option("prefs", {
