@@ -4,78 +4,26 @@ js_constants.py
 Semua JavaScript selector string untuk Shadow DOM automation
 di business.gemini.google
 
-Update: path diperbaiki untuk Chrome 145+ (main > ucs-chat-landing)
-Masing-masing JS mencoba beberapa path (new -> old) sebagai fallback.
+Selector utama berdasarkan outerHTML yang dikonfirmasi langsung dari DevTools:
+- Step 16: jslog=283097 (md-text-button "I'll do this later")
+- Step 17: jslog=283108, id=tool-selector-menu-anchor (md-text-button tools)
+- Step 18: jslog=283118 (md-menu-item Veo)
+- Step 19: id=agent-search-prosemirror-editor (ucs-prosemirror-editor)
 """
 
 # ================================================================
-# Helper: resolve shadow chain, return null jika salah satu miss
+# Helper: klik elemen Material Design (md-text-button / md-icon-button)
+# Struktur: md-*-button > #shadow-root > button#button > span.touch
+# span.touch adalah touch target yang sebenarnya
 # ================================================================
-_JS_SHADOW_RESOLVE = """
-function _sr(el, sel) {
-    try { return el.shadowRoot ? el.shadowRoot.querySelector(sel) : null; }
-    catch(e) { return null; }
-}
-"""
-
-# Prefix standar semua query: ucs-standalone-app shadowRoot
-_JS_APP_ROOT = "document.querySelector('body > ucs-standalone-app')"
-
-# ================================================================
-# Helper internal: klik md-icon-button dengan benar
-# Struktur: md-icon-button > #shadow-root > button#button > span.touch
-# Yang merespons klik adalah span.touch, bukan elemen luar
-# ================================================================
-_JS_CLICK_MD_ICON_BUTTON = """
-function clickMdIconButton(btn) {
-    if (!btn) return false;
-    // Coba span.touch di shadowRoot button internal
-    if (btn.shadowRoot) {
-        var touch = btn.shadowRoot.querySelector('#button > span.touch') ||
-                    btn.shadowRoot.querySelector('span.touch') ||
-                    btn.shadowRoot.querySelector('#button');
-        if (touch) { touch.click(); return true; }
-    }
-    // Fallback langsung klik elemennya
-    btn.click();
-    return true;
-}
-"""
 
 # ================================================================
 # Step 16 - Dismiss popup 'I'll do this later'
+# Confirmed outerHTML: <md-text-button jslog="283097;track:impression,click" value="">
 # ================================================================
 _JS_DISMISS_POPUP = """
 (function() {
-    var app = document.querySelector("body > ucs-standalone-app");
-    if (!app || !app.shadowRoot) return false;
-    var dialog = app.shadowRoot.querySelector("ucs-welcome-dialog");
-    if (!dialog || !dialog.shadowRoot) return false;
-    var selectors = [
-        "div > md-dialog > div:nth-child(3) > md-text-button",
-        "md-dialog md-text-button",
-        "md-text-button"
-    ];
-    for (var i = 0; i < selectors.length; i++) {
-        var btn = dialog.shadowRoot.querySelector(selectors[i]);
-        if (btn) {
-            btn.click();
-            return true;
-        }
-    }
-    return false;
-})();
-"""
-
-# ================================================================
-# Step 17 - Click tools button
-# FIX: klik span.touch di dalam shadowRoot button, bukan anchor/md-icon
-# Dari DevTools: #tool-selector-menu-anchor > #shadow-root > button#button > span.touch
-# ================================================================
-_JS_CLICK_TOOLS = """
-(function() {
-    // Helper: klik md-icon-button dengan benar via span.touch
-    function clickMdIconButton(btn) {
+    function clickBtn(btn) {
         if (!btn) return false;
         if (btn.shadowRoot) {
             var touch = btn.shadowRoot.querySelector('#button > span.touch') ||
@@ -87,55 +35,64 @@ _JS_CLICK_TOOLS = """
         return true;
     }
 
-    var app = document.querySelector("body > ucs-standalone-app");
-    if (!app || !app.shadowRoot) return false;
-    var appRoot = app.shadowRoot;
-
-    var landingSelectors = [
-        "div > div.ucs-standalone-outer-row-container > div > main > ucs-chat-landing",
-        "div > div.ucs-standalone-outer-row-container > div > ucs-chat-landing",
-        "main > ucs-chat-landing",
-        "ucs-chat-landing"
-    ];
-
-    for (var li = 0; li < landingSelectors.length; li++) {
-        var landing = appRoot.querySelector(landingSelectors[li]);
-        if (!landing || !landing.shadowRoot) continue;
-
-        var searchBarSelectors = [
-            "div > div > div > div.fixed-content > ucs-search-bar",
-            "div > div > div > ucs-search-bar",
-            "ucs-search-bar"
-        ];
-
-        for (var si = 0; si < searchBarSelectors.length; si++) {
-            var searchBar = landing.shadowRoot.querySelector(searchBarSelectors[si]);
-            if (!searchBar || !searchBar.shadowRoot) continue;
-            var sbRoot = searchBar.shadowRoot;
-
-            // Path utama: #tool-selector-menu-anchor -> span.touch di shadowRoot-nya
-            var anchor = sbRoot.querySelector("#tool-selector-menu-anchor");
-            if (anchor) {
-                return clickMdIconButton(anchor);
-            }
-
-            // Fallback: cari md-icon-button dengan aria-label mengandung "tool"
-            var allBtns = sbRoot.querySelectorAll("md-icon-button");
-            for (var bi = 0; bi < allBtns.length; bi++) {
-                var aria = (allBtns[bi].getAttribute('aria-label') || '').toLowerCase();
-                if (aria.includes('tool') || aria.includes('select')) {
-                    return clickMdIconButton(allBtns[bi]);
-                }
-            }
-        }
-    }
-
-    // Deep-scan fallback: cari #tool-selector-menu-anchor di semua shadow roots
     function deepScan(root, depth) {
         if (depth > 8) return false;
-        var anchor = root.querySelector ? root.querySelector("#tool-selector-menu-anchor") : null;
-        if (anchor) return clickMdIconButton(anchor);
-        var all = root.querySelectorAll ? root.querySelectorAll("*") : [];
+        // Primary: jslog=283097
+        var btn = root.querySelector ? root.querySelector("[jslog*='283097']") : null;
+        if (btn) return clickBtn(btn);
+        // Fallback: md-text-button dengan text 'do this later'
+        var btns = root.querySelectorAll ? root.querySelectorAll('md-text-button') : [];
+        for (var i = 0; i < btns.length; i++) {
+            var txt = (btns[i].textContent || '').toLowerCase();
+            if (txt.includes('do this later') || txt.includes("i'll do")) return clickBtn(btns[i]);
+        }
+        var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot && deepScan(all[i].shadowRoot, depth + 1)) return true;
+        }
+        return false;
+    }
+    return deepScan(document, 0);
+})();
+"""
+
+# ================================================================
+# Step 17 - Click tools button
+# Confirmed outerHTML:
+#   <md-text-button id="tool-selector-menu-anchor"
+#     jslog="283108;track:click"
+#     data-aria-label="Select tools"
+#     class="omnibox-tools-selector selector-button">
+# ================================================================
+_JS_CLICK_TOOLS = """
+(function() {
+    function clickBtn(btn) {
+        if (!btn) return false;
+        if (btn.shadowRoot) {
+            var touch = btn.shadowRoot.querySelector('#button > span.touch') ||
+                        btn.shadowRoot.querySelector('span.touch') ||
+                        btn.shadowRoot.querySelector('#button');
+            if (touch) { touch.click(); return true; }
+        }
+        btn.click();
+        return true;
+    }
+
+    function deepScan(root, depth) {
+        if (depth > 8) return false;
+        // Primary: jslog=283108
+        var btn = root.querySelector ? root.querySelector("[jslog*='283108']") : null;
+        if (btn) return clickBtn(btn);
+        // Secondary: id=tool-selector-menu-anchor
+        btn = root.querySelector ? root.querySelector("#tool-selector-menu-anchor") : null;
+        if (btn) return clickBtn(btn);
+        // Tertiary: class omnibox-tools-selector
+        btn = root.querySelector ? root.querySelector(".omnibox-tools-selector") : null;
+        if (btn) return clickBtn(btn);
+        // Fallback: data-aria-label="Select tools"
+        btn = root.querySelector ? root.querySelector("[data-aria-label='Select tools']") : null;
+        if (btn) return clickBtn(btn);
+        var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
         for (var i = 0; i < all.length; i++) {
             if (all[i].shadowRoot && deepScan(all[i].shadowRoot, depth + 1)) return true;
         }
@@ -147,78 +104,39 @@ _JS_CLICK_TOOLS = """
 
 # ================================================================
 # Step 18 - Click 'Create videos with Veo'
+# Confirmed outerHTML:
+#   <md-menu-item jslog="283118;track:click" md-menu-item="">
+#     <div slot="headline">Create videos with Veo</div>
 # ================================================================
 _JS_CLICK_VEO = """
 (function() {
-    var app = document.querySelector("body > ucs-standalone-app");
-    if (!app || !app.shadowRoot) return false;
-    var appRoot = app.shadowRoot;
-
-    var landingSelectors = [
-        "div > div.ucs-standalone-outer-row-container > div > main > ucs-chat-landing",
-        "div > div.ucs-standalone-outer-row-container > div > ucs-chat-landing",
-        "main > ucs-chat-landing",
-        "ucs-chat-landing"
-    ];
-
-    for (var li = 0; li < landingSelectors.length; li++) {
-        var landing = appRoot.querySelector(landingSelectors[li]);
-        if (!landing || !landing.shadowRoot) continue;
-
-        var searchBarSelectors = [
-            "div > div > div > div.fixed-content > ucs-search-bar",
-            "div > div > div > ucs-search-bar",
-            "ucs-search-bar"
-        ];
-
-        for (var si = 0; si < searchBarSelectors.length; si++) {
-            var searchBar = landing.shadowRoot.querySelector(searchBarSelectors[si]);
-            if (!searchBar || !searchBar.shadowRoot) continue;
-            var sbRoot = searchBar.shadowRoot;
-
-            // Search all md-menu-item elements for text containing "veo" or "video"
-            var veoSelectors = [
-                "div > form > div > div.actions-buttons.omnibar.multiline-input-actions-buttons > div.tools-button-container > md-menu > div:nth-child(7) > md-menu-item",
-                "md-menu md-menu-item",
-                "md-menu-item"
-            ];
-
-            for (var vi = 0; vi < veoSelectors.length; vi++) {
-                var items = sbRoot.querySelectorAll(veoSelectors[vi]);
-                for (var ii = 0; ii < items.length; ii++) {
-                    var txt = (items[ii].textContent || items[ii].innerText || "").toLowerCase();
-                    if (txt.includes("veo") || txt.includes("video")) {
-                        var icon = items[ii].querySelector("md-icon");
-                        if (icon) { icon.click(); return true; }
-                        var innerDiv = items[ii].querySelector("div");
-                        if (innerDiv) { innerDiv.click(); return true; }
-                        items[ii].click();
-                        return true;
-                    }
-                }
-            }
-
-            var directIcon = sbRoot.querySelector("div > form > div > div.actions-buttons.omnibar.multiline-input-actions-buttons > div.tools-button-container > md-menu > div:nth-child(7) > md-menu-item > md-icon");
-            if (directIcon) { directIcon.click(); return true; }
-            var directDiv = sbRoot.querySelector("div > form > div > div.actions-buttons.omnibar.multiline-input-actions-buttons > div.tools-button-container > md-menu > div:nth-child(7) > md-menu-item > div");
-            if (directDiv) { directDiv.click(); return true; }
+    function clickBtn(btn) {
+        if (!btn) return false;
+        if (btn.shadowRoot) {
+            var touch = btn.shadowRoot.querySelector('#item > span.touch') ||
+                        btn.shadowRoot.querySelector('span.touch') ||
+                        btn.shadowRoot.querySelector('#item');
+            if (touch) { touch.click(); return true; }
         }
+        // Klik div[slot=headline] di dalam menu item
+        var headline = btn.querySelector("[slot='headline']") || btn.querySelector('div');
+        if (headline) { headline.click(); return true; }
+        btn.click();
+        return true;
     }
 
-    // Deep-scan fallback
     function deepScan(root, depth) {
         if (depth > 8) return false;
-        var items = root.querySelectorAll ? root.querySelectorAll("md-menu-item") : [];
+        // Primary: jslog=283118
+        var item = root.querySelector ? root.querySelector("[jslog*='283118']") : null;
+        if (item) return clickBtn(item);
+        // Fallback: md-menu-item dengan text 'veo' atau 'video'
+        var items = root.querySelectorAll ? root.querySelectorAll('md-menu-item') : [];
         for (var i = 0; i < items.length; i++) {
-            var txt = (items[i].textContent || items[i].innerText || "").toLowerCase();
-            if (txt.includes("veo") || txt.includes("video")) {
-                var icon = items[i].querySelector("md-icon");
-                if (icon) { icon.click(); return true; }
-                items[i].click();
-                return true;
-            }
+            var txt = (items[i].textContent || '').toLowerCase();
+            if (txt.includes('veo') || txt.includes('create video')) return clickBtn(items[i]);
         }
-        var all = root.querySelectorAll ? root.querySelectorAll("*") : [];
+        var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
         for (var i = 0; i < all.length; i++) {
             if (all[i].shadowRoot && deepScan(all[i].shadowRoot, depth + 1)) return true;
         }
@@ -230,56 +148,45 @@ _JS_CLICK_VEO = """
 
 # ================================================================
 # Step 19 - Get prompt input element
+# Confirmed outerHTML:
+#   <ucs-prosemirror-editor id="agent-search-prosemirror-editor"
+#     aria-label="Search" class="prosemirror-editor">
 # ================================================================
 _JS_GET_PROMPT_INPUT = """
 (function() {
-    var app = document.querySelector("body > ucs-standalone-app");
-    if (!app || !app.shadowRoot) return null;
-    var appRoot = app.shadowRoot;
-
-    var containerSelectors = [
-        "div > div.ucs-standalone-outer-row-container > div > main > ucs-chat-landing",
-        "div > div.ucs-standalone-outer-row-container > div > ucs-chat-landing",
-        "main > ucs-chat-landing",
-        "ucs-chat-landing"
-    ];
-
-    for (var li = 0; li < containerSelectors.length; li++) {
-        var landing = appRoot.querySelector(containerSelectors[li]);
-        if (!landing || !landing.shadowRoot) continue;
-
-        var searchBarSelectors = [
-            "div > div > div > div.fixed-content > ucs-search-bar",
-            "div > div > div > ucs-search-bar",
-            "ucs-search-bar"
-        ];
-
-        for (var si = 0; si < searchBarSelectors.length; si++) {
-            var searchBar = landing.shadowRoot.querySelector(searchBarSelectors[si]);
-            if (!searchBar || !searchBar.shadowRoot) continue;
-
-            var editorSelectors = [
-                "#agent-search-prosemirror-editor",
-                "div[id='agent-search-prosemirror-editor']",
-                "ucs-prosemirror-editor",
-            ];
-
-            for (var ei = 0; ei < editorSelectors.length; ei++) {
-                var editor = searchBar.shadowRoot.querySelector(editorSelectors[ei]);
-                if (!editor) continue;
-                if (editor.shadowRoot) {
-                    var p = editor.shadowRoot.querySelector("div > div > div > p");
-                    if (p) return p;
-                    var pm = editor.shadowRoot.querySelector(".ProseMirror");
-                    if (pm) return pm;
-                    var ce = editor.shadowRoot.querySelector("[contenteditable='true']");
-                    if (ce) return ce;
-                }
-                return editor;
+    function findEditor(root, depth) {
+        if (depth > 8) return null;
+        // Primary: id=agent-search-prosemirror-editor
+        var editor = root.querySelector ? root.querySelector('#agent-search-prosemirror-editor') : null;
+        if (editor) {
+            if (editor.shadowRoot) {
+                var p = editor.shadowRoot.querySelector('div > div > div > p') ||
+                        editor.shadowRoot.querySelector('.ProseMirror') ||
+                        editor.shadowRoot.querySelector("[contenteditable='true']");
+                if (p) return p;
+            }
+            return editor;
+        }
+        // Fallback: ucs-prosemirror-editor
+        editor = root.querySelector ? root.querySelector('ucs-prosemirror-editor') : null;
+        if (editor) {
+            if (editor.shadowRoot) {
+                var p = editor.shadowRoot.querySelector('.ProseMirror') ||
+                        editor.shadowRoot.querySelector("[contenteditable='true']");
+                if (p) return p;
+            }
+            return editor;
+        }
+        var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot) {
+                var found = findEditor(all[i].shadowRoot, depth + 1);
+                if (found) return found;
             }
         }
+        return null;
     }
-    return null;
+    return findEditor(document, 0);
 })();
 """
 
@@ -458,13 +365,14 @@ _JS_LIST_BUTTONS = """
     var result = [];
     function scan(root, depth) {
         if (depth > 10) return;
-        var btns = root.querySelectorAll('button, gds-button, gmp-button, md-icon-button, md-filled-icon-button');
+        var btns = root.querySelectorAll('button, gds-button, gmp-button, md-icon-button, md-filled-icon-button, md-text-button');
         btns.forEach(function(b) {
             result.push({
                 tag: b.tagName,
                 id: b.id || '',
                 cls: b.getAttribute('class') || '',
-                aria: b.getAttribute('aria-label') || '',
+                aria: b.getAttribute('aria-label') || b.getAttribute('data-aria-label') || '',
+                jslog: (b.getAttribute('jslog') || '').substring(0, 20),
                 text: (b.innerText || b.textContent || '').trim().substring(0, 80),
                 visible: b.offsetParent !== null
             });
