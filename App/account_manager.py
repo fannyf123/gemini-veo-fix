@@ -27,26 +27,70 @@ OTP_TIMEOUT            = 90
 MAX_ACCOUNT_RETRY      = 3
 MAX_EMAIL_SUBMIT_RETRY = 5
 
-# URL prefix yang valid untuk halaman Gemini utama (bukan login/OTP)
 _GEMINI_MAIN_URL_PREFIXES = [
     "https://business.gemini.google/app",
     "https://business.gemini.google/",
 ]
 
-# JS path exact untuk tombol "Sign up or sign in" di error page
 _JS_SIGN_IN_ERROR_BTN = (
     'return document.querySelector('
     '"#yDmH0d > c-wiz > div > div > div > div > div > div '
     '> div > div > div > div > div > button > span.AeBiU-vQzf8d");'
 )
 
-# Teks yang mengindikasikan error page "Let's try something else"
 _ERROR_PAGE_INDICATORS = [
     "let's try something else",
     "lets try something else",
     "trouble retrieving the email",
     "go back to sign up or sign in",
 ]
+
+# JS: tunggu sampai shadow root ucs-standalone-app ada DAN search-bar/tools button
+# sudah bisa di-query (shadow DOM fully rendered)
+_JS_WAIT_SHADOW_READY = """
+(function() {
+    var app = document.querySelector('body > ucs-standalone-app');
+    if (!app || !app.shadowRoot) return false;
+    // Cek tools button sudah ada di salah satu shadow root
+    function scan(root, depth) {
+        if (depth > 8) return false;
+        if (root.querySelector && (
+            root.querySelector("[jslog*='283108']") ||
+            root.querySelector('#tool-selector-menu-anchor') ||
+            root.querySelector('.omnibox-tools-selector') ||
+            root.querySelector('[data-aria-label=\'Select tools\']')
+        )) return true;
+        var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot && scan(all[i].shadowRoot, depth + 1)) return true;
+        }
+        return false;
+    }
+    return scan(app.shadowRoot, 0);
+})();
+"""
+
+# JS: tunggu sampai ucs-prosemirror-editor / search bar muncul (halaman fully loaded)
+_JS_WAIT_SEARCHBAR_READY = """
+(function() {
+    var app = document.querySelector('body > ucs-standalone-app');
+    if (!app || !app.shadowRoot) return false;
+    function scan(root, depth) {
+        if (depth > 8) return false;
+        if (root.querySelector && (
+            root.querySelector('#agent-search-prosemirror-editor') ||
+            root.querySelector('ucs-prosemirror-editor') ||
+            root.querySelector('ucs-search-bar')
+        )) return true;
+        var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot && scan(all[i].shadowRoot, depth + 1)) return true;
+        }
+        return false;
+    }
+    return scan(app.shadowRoot, 0);
+})();
+"""
 
 FIRST_NAMES = [
     "Tyler", "Jordan", "Casey", "Morgan", "Avery", "Riley", "Quinn",
@@ -273,7 +317,6 @@ class AccountManagerMixin:
         self._log("Signing in completed.")
         self._wait_page_ready(driver, timeout=20, label="Post-SignIn")
 
-        # ── [FIX] Pastikan driver ada di gemini_tab dan URL sudah benar ──────
         self._log("Step 10: Ensuring driver is on correct Gemini tab...")
         self._ensure_gemini_tab(driver, gemini_tab)
 
@@ -303,18 +346,11 @@ class AccountManagerMixin:
     # =========================================================================
 
     def _ensure_gemini_tab(self, driver, gemini_tab: str):
-        """
-        1. Switch ke gemini_tab
-        2. Cek URL sudah di business.gemini.google (bukan accounts.google / OTP page)
-        3. Jika URL masih di login/OTP, tunggu sampai redirect ke Gemini main page
-        4. Log URL saat ini untuk debug
-        """
         try:
             driver.switch_to.window(gemini_tab)
             self._log(f"[TAB] Switched to gemini_tab: {gemini_tab}")
         except Exception as e:
             self._log(f"[TAB] Switch to gemini_tab failed: {e}", "WARNING")
-            # Fallback: coba cari tab yang URLnya Gemini
             for handle in driver.window_handles:
                 try:
                     driver.switch_to.window(handle)
@@ -325,14 +361,12 @@ class AccountManagerMixin:
                 except Exception:
                     pass
 
-        # Log URL saat ini
         try:
             current_url = driver.current_url
             self._log(f"[TAB] Current URL before setup: {current_url}")
         except Exception:
             current_url = ""
 
-        # Jika masih di accounts.google atau URL sign-in, tunggu redirect
         if "accounts.google" in current_url or "business.gemini.google" not in current_url:
             self._log("[TAB] URL not yet at Gemini main, waiting for redirect...", "WARNING")
             deadline = time.time() + 30
@@ -346,14 +380,12 @@ class AccountManagerMixin:
                     pass
                 time.sleep(1)
             else:
-                # Paksa navigate ke Gemini jika redirect tidak terjadi
                 self._log("[TAB] Redirect timeout, navigating to Gemini directly...", "WARNING")
                 try:
                     driver.get(GEMINI_HOME_URL)
                 except Exception:
                     pass
 
-        # Tunggu halaman Gemini benar-benar ready
         self._wait_page_ready(driver, timeout=20, label="Gemini Main Page (pre-setup)")
 
         # Tunggu ucs-standalone-app muncul di DOM
@@ -373,6 +405,33 @@ class AccountManagerMixin:
         else:
             self._log("[TAB] ucs-standalone-app NOT found after 20s!", "WARNING")
             self._debug_dump(driver, "no_ucs_app")
+            return
+
+        # ── TAMBAHAN: Tunggu search bar + tools button selesai render di shadow DOM ──
+        self._log("[TAB] Waiting for search bar & tools button in shadow DOM...")
+        deadline = time.time() + 30
+        searchbar_ready = False
+        tools_ready = False
+        while time.time() < deadline:
+            try:
+                if not searchbar_ready:
+                    searchbar_ready = bool(driver.execute_script(_JS_WAIT_SEARCHBAR_READY))
+                if not tools_ready:
+                    tools_ready = bool(driver.execute_script(_JS_WAIT_SHADOW_READY))
+                if searchbar_ready and tools_ready:
+                    self._log("[TAB] Shadow DOM fully rendered: search bar + tools button ready")
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        else:
+            self._log(
+                f"[TAB] Shadow DOM render timeout: searchbar={searchbar_ready}, tools={tools_ready}",
+                "WARNING"
+            )
+            self._debug_dump(driver, "shadow_dom_not_ready")
+        # Tambah jeda kecil setelah ready agar animasi selesai
+        time.sleep(1.5)
 
     # =========================================================================
     # Helper: baca email yang ditampilkan Gemini di OTP page
@@ -842,7 +901,6 @@ class AccountManagerMixin:
     # =========================================================================
 
     def _initial_setup(self, driver):
-        # Log URL dan tab aktif sebelum mulai
         try:
             self._log(f"[SETUP] Active tab: {driver.current_window_handle}, URL: {driver.current_url}")
         except Exception:
@@ -868,6 +926,24 @@ class AccountManagerMixin:
             self._log("No 'do this later' popup found, proceeding...", "WARNING")
         self._wait_page_ready(driver, timeout=15, label="Post-Dismiss Popup")
 
+        # ── Tunggu tools button siap (shadow DOM rendered) ──────────────────
+        self._log("[SETUP] Waiting for tools button ready in shadow DOM...")
+        deadline = time.time() + 30
+        tools_dom_ready = False
+        while time.time() < deadline:
+            try:
+                tools_dom_ready = bool(driver.execute_script(_JS_WAIT_SHADOW_READY))
+                if tools_dom_ready:
+                    self._log("[SETUP] Tools button found in shadow DOM, proceeding.")
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        if not tools_dom_ready:
+            self._log("[SETUP] Tools button still not in shadow DOM, trying anyway...", "WARNING")
+            self._debug_dump(driver, "tools_shadow_not_ready")
+        time.sleep(0.5)
+
         self._log("Step 17: Clicking tools button...")
         tools_clicked = False
         for tools_try in range(1, 6):
@@ -882,7 +958,6 @@ class AccountManagerMixin:
                         f"Tools button JS returned falsy (attempt {tools_try}/5)",
                         "WARNING"
                     )
-                    # Debug: list semua button di seluruh DOM
                     try:
                         btns = driver.execute_script(_JS_LIST_BUTTONS)
                         self._log(f"[DEBUG] Buttons in DOM: {(btns or 'none')[:500]}")
