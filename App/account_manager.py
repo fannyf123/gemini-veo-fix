@@ -12,6 +12,7 @@ Flow:
   Step 6  : Baca inbox mailticking, buka email OTP
   Step 7  : Ambil kode OTP dari span
   Step 8  : Input OTP ke Gemini
+            Selector: #yDmH0d > c-wiz > ... > div:nth-child(1)  (bukan input)
   Step 9  : Klik Verify
   Step 10 : Isi nama #mat-input-0
   Step 11 : Klik Agree
@@ -45,10 +46,19 @@ MAX_EMAIL_SUBMIT_RETRY = 5
 # ── Gemini selectors ──────────────────────────────────────────────────────────
 _SEL_EMAIL_INPUT     = "#email-input"
 _SEL_LOGIN_BTN       = "#log-in-button > span.UywwFc-RLmnJb"
-_SEL_OTP_INPUT       = (
+
+# Step 8: container div yang wrapping OTP digit boxes
+# (bukan <input> melainkan <div:nth-child(1)> di dalam .AFffCd)
+_SEL_OTP_CONTAINER   = (
+    "#yDmH0d > c-wiz > div > div > div.keerLb > div > div > div > form "
+    "> div:nth-child(1) > div > div.AFffCd > div > div:nth-child(1)"
+)
+# Fallback: cari input biasa di dalam area yang sama
+_SEL_OTP_INPUT_INNER = (
     "#yDmH0d > c-wiz > div > div > div.keerLb > div > div > div > form "
     "> div:nth-child(1) > div > div.AFffCd > div > input"
 )
+
 _SEL_VERIFY_BTN      = (
     "#yDmH0d > c-wiz > div > div > div.keerLb > div > div > div > form "
     "> div.rPlx0b > div > div:nth-child(1) > span "
@@ -70,11 +80,10 @@ _SEL_MT_MODAL_BODY   = (
     "#emailActivationModal > div > div "
     "> div.modal-body.pt-4 > div > div > div > div.form-group"
 )
-# 4 ceklist: nth-child(1)=@domain.com (sisakan), (2)(3)(4)=uncheck
 _SEL_MT_LABEL_1      = _SEL_MT_MODAL_BODY + " > div:nth-child(1) > label"  # @domain.com — sisakan
 _SEL_MT_LABEL_2      = _SEL_MT_MODAL_BODY + " > div:nth-child(2) > label"  # uncheck
-_SEL_MT_LABEL_3      = _SEL_MT_MODAL_BODY + " > div:nth-child(3) > label"  # uncheck (@gmail)
-_SEL_MT_LABEL_4      = _SEL_MT_MODAL_BODY + " > div:nth-child(4) > label"  # uncheck (@googlemail)
+_SEL_MT_LABEL_3      = _SEL_MT_MODAL_BODY + " > div:nth-child(3) > label"  # uncheck @gmail
+_SEL_MT_LABEL_4      = _SEL_MT_MODAL_BODY + " > div:nth-child(4) > label"  # uncheck @googlemail
 
 _SEL_MT_CHANGE_BTN   = "#modalChange"
 _SEL_MT_SELECTED     = "#selectedEmail"
@@ -166,6 +175,39 @@ def _css_type(driver, selector, text, timeout=15, clear=True):
         return False
 
 
+def _find_otp_target(driver):
+    """
+    Cari elemen tujuan ketik OTP.
+    Prioritas:
+      1. div:nth-child(1) di dalam .AFffCd  (selector baru dari DevTools)
+      2. input di dalam area yang sama       (fallback lama)
+      3. input visible apapun di halaman
+    Return: (element, use_send_keys: bool)
+    """
+    # 1. Container baru (div)
+    el = _wait_for_css(driver, _SEL_OTP_CONTAINER, timeout=10, visible=True)
+    if el:
+        # Klik container dulu supaya fokus, lalu ketik via ActionChains
+        return el, True
+
+    # 2. Input lama (fallback)
+    el = _wait_for_css(driver, _SEL_OTP_INPUT_INNER, timeout=5, visible=True)
+    if el:
+        return el, False
+
+    # 3. Semua input visible di halaman
+    try:
+        for inp in driver.find_elements(By.CSS_SELECTOR, "input"):
+            if inp.is_displayed() and (inp.get_attribute("type") or "").lower() in (
+                "text", "tel", "number", ""
+            ):
+                return inp, False
+    except Exception:
+        pass
+
+    return None, False
+
+
 class AccountManagerMixin:
 
     def _register_account(self, driver, worker_id=0) -> bool:
@@ -182,9 +224,9 @@ class AccountManagerMixin:
 
     def _register_once(self, driver, worker_id=0) -> bool:
 
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         # STEP 1: Buka business.gemini.google
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         self._log("Step 1: Buka business.gemini.google")
         try:
             driver.get(GEMINI_HOME_URL)
@@ -193,9 +235,9 @@ class AccountManagerMixin:
             pass
         gemini_tab = driver.current_window_handle
 
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         # STEP 2: Buka mailticking, uncheck 3 format, sisakan @domain.com
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         self._log("Step 2: Buka mailticking.com")
         driver.execute_script("window.open('about:blank', '_blank');")
         time.sleep(0.5)
@@ -248,7 +290,7 @@ class AccountManagerMixin:
                 pass
         time.sleep(0.8)
 
-        # Uncheck semua kecuali nth-child(1) = @domain.com
+        # Uncheck semua kecuali nth-child(1)
         self._log("Step 2: Uncheck div:nth-child(2)")
         self._uncheck_label(driver, _SEL_MT_LABEL_2)
         self._log("Step 2: Uncheck div:nth-child(3) @gmail")
@@ -258,9 +300,9 @@ class AccountManagerMixin:
         self._log("Step 2: Pastikan div:nth-child(1) @domain.com checked")
         self._ensure_checked(driver, _SEL_MT_LABEL_1)
 
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         # STEP 3: Klik Change → verify non-gmail → Activate
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         self._log("Step 3: Klik #modalChange")
         if not _css_click(driver, _SEL_MT_CHANGE_BTN, timeout=10, js_click=True):
             self._log("Step 3: Fallback cari tombol 'change'", "WARNING")
@@ -299,7 +341,6 @@ class AccountManagerMixin:
 
         self._log(f"Step 3: Email kandidat: {email}")
 
-        # Auto-loop jika masih gmail
         for i in range(10):
             if not email or not _is_gmail_email(email):
                 break
@@ -334,9 +375,9 @@ class AccountManagerMixin:
                 pass
         time.sleep(1)
 
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         # STEP 4: Switch ke Gemini, input email
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         self._log(f"Step 4: Input email ke Gemini: {email}")
         driver.switch_to.window(gemini_tab)
 
@@ -391,9 +432,9 @@ class AccountManagerMixin:
             self._log("Step 4: Gagal submit email", "ERROR")
             return False
 
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         # STEP 5: Tunggu URL verification page (tanpa tunggu #c2)
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         self._log("Step 5: Tunggu URL verification page...")
         self._wait_page_ready(driver, timeout=20, label="OTP Page")
 
@@ -411,9 +452,9 @@ class AccountManagerMixin:
                 pass
             time.sleep(1)
 
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         # STEP 6: Switch mailticking, tunggu email OTP
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         self._log("Step 6: Switch mailticking, tunggu email OTP")
         driver.switch_to.window(mail_tab)
 
@@ -449,9 +490,9 @@ class AccountManagerMixin:
         except Exception:
             pass
 
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         # STEP 7: Ambil kode OTP
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         self._log("Step 7: Ambil kode OTP")
         otp = ""
         for _ in range(5):
@@ -473,9 +514,10 @@ class AccountManagerMixin:
             self._log("Step 7: OTP tidak ditemukan", "ERROR")
             return False
 
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         # STEP 8: Input OTP ke Gemini
-        # ─────────────────────────────────────────────────────────────────────
+        # Selector baru: div:nth-child(1) di dalam .AFffCd  (bukan <input>)
+        # ──────────────────────────────────────────────────────────────────────
         self._log("Step 8: Input OTP ke Gemini")
         driver.switch_to.window(gemini_tab)
         self._wait_page_ready(driver, timeout=15, label="Gemini OTP Form")
@@ -483,25 +525,34 @@ class AccountManagerMixin:
 
         otp_ok = False
         for attempt in range(1, 4):
-            el = _wait_for_css(driver, _SEL_OTP_INPUT, timeout=10, visible=True)
+            el, use_send_keys = _find_otp_target(driver)
+
             if not el:
-                try:
-                    for inp in driver.find_elements(By.CSS_SELECTOR, "input"):
-                        if inp.is_displayed() and (inp.get_attribute("type") or "").lower() in ("text", "tel", "number", ""):
-                            el = inp
-                            break
-                except Exception:
-                    pass
-            if not el:
-                self._log(f"Step 8: OTP input tidak ditemukan (attempt {attempt}/3)", "WARNING")
-                time.sleep(2)
+                self._log(f"Step 8: OTP target tidak ditemukan (attempt {attempt}/3)", "WARNING")
+                self._debug_dump(driver, f"otp_not_found_{attempt}")
+                time.sleep(3)
                 continue
+
             try:
-                el.click()
+                # Klik elemen dulu untuk fokus
+                driver.execute_script("arguments[0].click();", el)
                 time.sleep(0.3)
-                for char in otp:
-                    ActionChains(driver).send_keys(char).perform()
-                    time.sleep(random.uniform(0.12, 0.25))
+
+                if use_send_keys:
+                    # Container div: kirim karakter via ActionChains ke body/aktif elemen
+                    for char in otp:
+                        ActionChains(driver).send_keys(char).perform()
+                        time.sleep(random.uniform(0.12, 0.25))
+                else:
+                    # Input biasa: clear + send_keys langsung ke elemen
+                    try:
+                        el.clear()
+                    except Exception:
+                        pass
+                    for char in otp:
+                        el.send_keys(char)
+                        time.sleep(random.uniform(0.12, 0.25))
+
                 self._log(f"Step 8: OTP diketik: {otp}")
                 otp_ok = True
                 break
@@ -516,9 +567,9 @@ class AccountManagerMixin:
 
         time.sleep(0.5)
 
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         # STEP 9: Klik Verify
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         self._log("Step 9: Klik Verify")
         verify_ok = _css_click(driver, _SEL_VERIFY_BTN, timeout=10, js_click=True)
         if not verify_ok:
@@ -535,12 +586,15 @@ class AccountManagerMixin:
                         break
                 except Exception:
                     pass
-        self._log("Step 9: Verify clicked" if verify_ok else "Step 9: Verify button tidak ditemukan", "INFO" if verify_ok else "WARNING")
+        self._log(
+            "Step 9: Verify clicked" if verify_ok else "Step 9: Verify button tidak ditemukan",
+            "INFO" if verify_ok else "WARNING"
+        )
         time.sleep(random.uniform(0.3, 0.6))
 
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         # STEP 10: Isi nama
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         self._log("Step 10: Tunggu form nama")
         _wait_for_css(driver, _SEL_FULL_NAME_LABEL, timeout=30, visible=False)
         name = _random_name()
@@ -552,9 +606,9 @@ class AccountManagerMixin:
                     break
         self._log(f"Step 10: Nama={'diisi: ' + name if name_ok else 'gagal diisi'}")
 
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         # STEP 11: Klik Agree
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         self._log("Step 11: Klik Agree")
         agree_ok = _css_click(driver, _SEL_AGREE_BTN, timeout=15, js_click=True)
         if not agree_ok:
@@ -573,12 +627,14 @@ class AccountManagerMixin:
                     pass
                 if agree_ok:
                     break
-        self._log("Step 11: Agree clicked" if agree_ok else "Step 11: Agree tidak ditemukan",
-                  "INFO" if agree_ok else "WARNING")
+        self._log(
+            "Step 11: Agree clicked" if agree_ok else "Step 11: Agree tidak ditemukan",
+            "INFO" if agree_ok else "WARNING"
+        )
 
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         # STEP 12: Tunggu loading selesai
-        # ─────────────────────────────────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────────────────
         self._log("Step 12: Tunggu loading selesai (h1 hilang)...")
         deadline = time.time() + 60
         while time.time() < deadline:
